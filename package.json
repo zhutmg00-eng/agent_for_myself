@@ -22,6 +22,8 @@
     "defaultPort": 8720,
     "gateway": "http://127.0.0.1:3425/v1"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0"
+  },
   "devDependencies": {}
 }

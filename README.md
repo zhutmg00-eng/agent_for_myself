@@ -12,6 +12,7 @@
 
 | 方式 | 操作 |
 |---|---|
+| **安装** | `npm install`（只装 pi；单测不需要网关） |
 | **开发模式（浏览器）** | `npm start`（或 `node src/main.js`），打开 `http://127.0.0.1:8720` |
 | **桌面打包** | `node scripts/build_portable.mjs`（增量：`--app-only`）→ `dist\AgentFusion-win64\AgentFusion.exe` |
 | **单元测试** | `node --test`（294 例，离线，不需要网关） |

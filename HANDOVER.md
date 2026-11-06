@@ -14,7 +14,7 @@
   再 `npm start` 打开 `http://127.0.0.1:8720`，或双击打包好的 `AgentFusion.exe`。
 - **怎么验**：`node --test`（294 例，不联网、不需要网关）；真实回合用 `node tests/e2e_room.mjs`。
 - **代码量**：`src/` 29 个 JS 文件（约 1.1 万行）、`web/` 零构建前端、`tests/` 20 个文件。
-- **依赖**：**零 npm 依赖**（`dependencies: {}`）。所有能力用 Node 内置模块 + pi 的 bundle 实现。
+- **依赖**：唯一运行时依赖是 **pi**（`@earendil-works/pi-coding-agent@1.5.0`，已在 `package.json` 声明）；其余零依赖。Electron 仅打包时需要。
 - **绝对约束**：运行数据只写 **D 盘**（默认 `D:\AgentFusion`，指向 C 盘会拒绝启动）；仓库里不含任何密钥。
 
 ---
@@ -43,7 +43,7 @@
 |---|---|---|
 | Node.js | **>= 22.19（推荐 24.x）** | 用到 `node:sqlite`（`DatabaseSync`）、`fetch`、`node:test`、ESM |
 | Electron | **45.x**（仅打包需要） | 不装也行：开发模式直接跑浏览器；打包时脚本按下面顺序找 Electron dist |
-| pi | **1.5.0**（`@earendil-works/pi-coding-agent`） | 运行时会从 `node_modules`、`../agentharness/desktop/node_modules`、`D:\tools\pi` 或 `FUSION_PI_PACKAGE` 找 |
+| pi | **1.5.0**（`@earendil-works/pi-coding-agent`） | `npm install` 会装它；运行时会从 `node_modules`、`../agentharness/desktop/node_modules`、`D:\tools\pi` 或 `FUSION_PI_PACKAGE` 找。**单测不需要它**（懒加载），跑应用/打包才需要 |
 | Magpie 网关 | OpenAI 兼容，默认 `http://127.0.0.1:3425/v1` | 模型名 `auto/deepseek-v4.1-flash`；apiKey 用占位串 `magpie-local` 即可 |
 | 操作系统 | Windows 10/11（主目标） | 路径守卫、Electron 打包、C 盘检查都是按 Windows 写的 |
 

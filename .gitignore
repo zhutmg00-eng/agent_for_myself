@@ -1,20 +1,20 @@
 # 依赖与构建产物
-node_modules/
-dist/
-build/
-out/
+/node_modules/
+/dist/
+/build/
+/out/
 
 # 运行数据（默认在 D:\AgentFusion；若有人用 FUSION_DATA_ROOT 指到仓库内，也不会被提交）
-data/
-logs/
-rooms/
-workspace/
-sessions/
-agents/
-cache/
+/data/
+/logs/
+/rooms/
+/workspace/
+/sessions/
+/agents/
+/cache/
 .peer/
-.pi-agent/
-.fusion-data/
+/.pi-agent/
+.fusion-/data/
 
 # 数据库与日志
 *.db
@@ -35,5 +35,5 @@ Thumbs.db
 *.swp
 
 # 临时目录
-temp/
-tmp/
+/temp/
+/tmp/

@@ -309,7 +309,7 @@ D:\AgentFusion\
 | 真实群聊（打包） | `node tests/e2e_packaged.mjs --port 8814 --data-root <D盘目录>` | 驱动真实 exe |
 | 桌面冒烟 | `node scripts/smoke_desktop.mjs --isolated` | 启动→health→窗口文本→截图→退出→无残留→C 盘零新增 |
 
-当前基线（2026-11-06）：
+当前基线（2026-11-06，并在**没有 `node_modules` 的干净 clone** 里复跑通过——单测确实只依赖 Node 内置模块）：
 
 - 单测 **294/294 pass**；
 - 源码版 e2e **PASS**（107s，含 `skill_proposed`）；

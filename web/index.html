@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentFusion</title>
+<meta name="description" content="AgentFusion — 群聊智能体工作台 · pi 内核">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="titlebar" id="titlebar">
+    <div class="tb-left">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><circle cx="7.2" cy="7.6" r="3.1"/><circle cx="16.8" cy="7.6" r="3.1"/><circle cx="12" cy="16.6" r="3.4"/></svg>
+      </span>
+      <span class="brand-name">AgentFusion</span>
+      <span class="brand-sub">群聊智能体工作台 · pi 内核</span>
+    </div>
+    <div class="tb-title" id="tb-title">Chief</div>
+    <div class="tb-right">
+      <span class="conn-pill" id="conn-pill"><span class="conn-dot" id="conn-dot"></span><span id="conn-text">连接中</span></span>
+      <div class="win-btns" id="win-btns" hidden>
+        <button class="win-btn" id="win-min" aria-label="最小化"><svg viewBox="0 0 16 16"><path d="M3.5 8.5h9"/></svg></button>
+        <button class="win-btn" id="win-max" aria-label="最大化"><svg viewBox="0 0 16 16"><rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1"/></svg></button>
+        <button class="win-btn win-close" id="win-close" aria-label="关闭"><svg viewBox="0 0 16 16"><path d="m4.6 4.6 6.8 6.8m0-6.8-6.8 6.8"/></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <div class="app-body">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-tools">
+        <button class="tool-btn" id="btn-search" title="搜索（Ctrl+K）" aria-label="搜索">
+          <svg viewBox="0 0 20 20"><circle cx="8.8" cy="8.8" r="4.7"/><path d="m12.4 12.4 3.3 3.3"/></svg>
+        </button>
+        <button class="tool-btn tool-btn-solid" id="btn-new" title="新建群聊（Ctrl+N）" aria-label="新建群聊">
+          <svg viewBox="0 0 20 20"><path d="M10 4.4v11.2M4.4 10h11.2"/></svg>
+        </button>
+      </div>
+
+      <div class="side-scroll" id="side-scroll">
+        <button class="chief-card" id="chief-card">
+          <span class="chief-orb" id="chief-orb"></span>
+          <span class="chief-meta">
+            <span class="chief-name">Chief</span>
+            <span class="chief-role">总管</span>
+          </span>
+          <span class="chief-arrow" aria-hidden="true">
+            <svg viewBox="0 0 20 20"><path d="m7.5 4.8 5.2 5.2-5.2 5.2"/></svg>
+          </span>
+        </button>
+
+        <section class="side-sec">
+          <header class="side-sec-head">
+            <span>群聊</span>
+            <button class="mini-btn" id="btn-new-room" title="新建群聊" aria-label="新建群聊">
+              <svg viewBox="0 0 20 20"><path d="M10 4.8v10.4M4.8 10h10.4"/></svg>
+            </button>
+          </header>
+          <div class="room-list" id="room-list"></div>
+          <div class="side-empty" id="room-empty">还没有群聊</div>
+        </section>
+
+        <section class="side-sec">
+          <header class="side-sec-head"><span>机器人</span></header>
+          <div class="bot-list" id="bot-list"></div>
+        </section>
+      </div>
+
+      <div class="side-foot">
+        <button class="foot-btn" id="btn-usage">
+          <svg viewBox="0 0 20 20"><path d="M4 15.5V10m6 5.5V5m6 10.5v-7"/></svg>
+          <span>用量与上下文</span>
+          <span class="foot-num" id="foot-usage">0</span>
+        </button>
+        <button class="foot-btn" id="btn-settings" title="设置（Ctrl+,）">
+          <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 3.2v1.6m0 10.4v1.6M3.2 10h1.6m10.4 0h1.6M5.2 5.2l1.1 1.1m7.4 7.4 1.1 1.1m0-9.6-1.1 1.1m-7.4 7.4-1.1 1.1"/></svg>
+          <span>设置</span>
+          <span class="foot-badge" id="approval-badge" hidden></span>
+        </button>
+        <div class="foot-model" id="foot-model">DeepSeek V4.1 Flash</div>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <div class="view" id="view" role="main"></div>
+    </main>
+
+    <aside class="inspector" id="inspector" hidden></aside>
+  </div>
+</div>
+
+<div class="modal-root" id="modal-root"></div>
+<div class="toast-root" id="toast-root" aria-live="polite"></div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+out/
+
+# 运行数据（默认在 D:\AgentFusion；若有人用 FUSION_DATA_ROOT 指到仓库内，也不会被提交）
+data/
+logs/
+rooms/
+workspace/
+sessions/
+agents/
+cache/
+.peer/
+.pi-agent/
+.fusion-data/
+
+# 数据库与日志
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# 参考源码（体积大，按 reference/README.md 自行克隆）
+reference/hermes/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# 临时目录
+temp/
+tmp/

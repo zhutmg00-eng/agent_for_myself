@@ -1,0 +1,27 @@
+{
+  "name": "agent-fusion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentFusion — pi-kernel multi-agent group-chat workbench (our vision on a mature harness)",
+  "main": "desktop/main.cjs",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "dev": "node src/main.js --port 8720",
+    "desktop": "node scripts/start_dev.mjs",
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "build": "node scripts/build_portable.mjs",
+    "smoke": "node scripts/smoke_desktop.mjs"
+  },
+  "fusion": {
+    "productName": "AgentFusion",
+    "electronDist": "../../agentharness/desktop/node_modules/electron/dist",
+    "defaultPort": 8720,
+    "gateway": "http://127.0.0.1:3425/v1"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

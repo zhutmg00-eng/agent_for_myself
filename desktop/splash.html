@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AgentFusion</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; margin: 0; background: #fbfaf7; color: #1c1b18;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    -webkit-user-select: none; user-select: none; }
+  .wrap { height: 100%; display: grid; place-items: center; -webkit-app-region: drag; }
+  .box { text-align: center; transform: translateY(-12px); width: 320px; }
+  .mark { width: 56px; height: 56px; margin: 0 auto 20px; color: #1c1b18; }
+  .mark svg { width: 100%; height: 100%; }
+  .mark .ring { fill: none; stroke: currentColor; stroke-width: 1.6; opacity: .55; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 6px; letter-spacing: .01em; }
+  p { font-size: 12px; color: rgba(28, 27, 24, .5); margin: 0; min-height: 17px; }
+  .dots { display: inline-flex; gap: 4px; margin-left: 7px; vertical-align: 2px; }
+  .dots i { width: 4px; height: 4px; border-radius: 50%; background: rgba(28, 27, 24, .35); animation: d 1.1s infinite; }
+  .dots i:nth-child(2) { animation-delay: .15s; }
+  .dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes d { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-3px); opacity: 1; } }
+  .bar { margin: 18px auto 0; width: 148px; height: 2px; border-radius: 2px; background: rgba(28, 27, 24, .1); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 38%; border-radius: 2px; background: rgba(28, 27, 24, .45);
+    animation: slide 1.5s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(300%); } }
+  .foot { position: fixed; left: 0; right: 0; bottom: 18px; text-align: center;
+    font-size: 11px; color: rgba(28, 27, 24, .32); letter-spacing: .02em; }
+  .err { color: #a4372b; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="box">
+      <div class="mark">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <circle class="ring" cx="17" cy="30" r="11"/>
+          <circle class="ring" cx="31" cy="30" r="11"/>
+          <circle cx="24" cy="18" r="7.6" fill="currentColor"/>
+        </svg>
+      </div>
+      <h1>AgentFusion</h1>
+      <p id="status">正在启动本地运行时<span class="dots"><i></i><i></i><i></i></span></p>
+      <div class="bar"><i></i></div>
+    </div>
+  </div>
+  <div class="foot">群聊智能体工作台 · pi 内核</div>
+<script>
+  // 主进程通过 executeJavaScript 调用这两个钩子更新 splash 文案。
+  window.__splashStatus = function (text) {
+    var el = document.getElementById('status');
+    if (!el) return;
+    el.innerHTML = String(text || '') + '<span class="dots"><i></i><i></i><i></i></span>';
+  };
+  window.__splashError = function (text) {
+    var el = document.getElementById('status');
+    if (!el) return;
+    el.className = 'err';
+    el.textContent = String(text || '启动失败');
+    var bar = document.querySelector('.bar');
+    if (bar) bar.style.display = 'none';
+  };
+</script>
+</body>
+</html>

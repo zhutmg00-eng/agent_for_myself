@@ -131,7 +131,8 @@ export function evalForwardProgress(result, ctx = {}) {
   // Tier 1: Mutating / execution tools
   const mutatingTools = [
     "write", "write_file", "edit", "edit_file", "bash", "powershell",
-    "room_file_save", "room_file_move", "room_assign_task", "room_create_subgroup"
+    "room_file_save", "room_file_move", "room_assign_task", "room_create_subgroup",
+    "room_grant_permission", "room_revoke_permission", "room_set_context_policy"
   ];
   const hasMutating = successfulTools.some((t) => mutatingTools.includes(t.name)) ||
     toolsUsed.some((name) => mutatingTools.includes(name) && !result?.error);
@@ -159,7 +160,10 @@ export function evalForwardProgress(result, ctx = {}) {
     (text.match(/^[-*]\s+/m) !== null) ||
     (text.match(/^\d+\.\s+/m) !== null)
   );
-  if (hasStructure) {
+  const fp = text.toLowerCase().replace(/[\s\p{P}]+/gu, "");
+  const fingerprints = ctx._round_turn_fingerprints || ctx.room?._round_turn_fingerprints || [];
+  const isDuplicate = fingerprints.some((f) => f.hash === fp);
+  if (hasStructure && !isDuplicate) {
     return { isProgress: true, grant: 1, resetStagnant: true, tier: 3, tierName: "structured_output", reason: "substantive_structured_text" };
   }
 
@@ -285,6 +289,7 @@ export class Room {
     /** @type {string[]} 已回收的小群 id（最近 50 个，持久化到 kv，便于追溯） */
     this.subgroup_history = this._loadSubgroupHistory();
     this._activeTurnController = null;
+    this._roundAbortController = null;
     this.base_relay_limit = Math.max(6, RELAY_LIMIT_FACTOR * Math.max(1, this.members.length));
     this.max_relay_ceiling = Number(this.settings?.max_relay_ceiling) || 25;
     this.max_chatter_relays = Number(this.settings?.max_chatter_relays) || 4;
@@ -874,11 +879,12 @@ export class Room {
     } catch (err) {
       log.warn("persist user message failed", err?.message || err);
     }
-    this.relays = 0;
-    this.relay_limit = Number(this.settings?.base_relay_limit) || this.base_relay_limit;
-    this.consecutive_stagnant_turns = 0;
-    this._round_tool_history = [];
-    this._round_turn_fingerprints = [];
+    if (!this.round_running) {
+      this.relays = 0;
+      this.consecutive_stagnant_turns = 0;
+      this._round_tool_history = [];
+      this._round_turn_fingerprints = [];
+    }
     this.status = "active";
     this.updated_at = record.timestamp;
     this.mentionMembers(text, speaker);
@@ -890,17 +896,23 @@ export class Room {
   }
 
   /**
-   * Cancel or abort the currently active assistant turn in this room.
+   * Cancel or abort the currently active round and assistant turn in this room.
    * @param {string} [reason]
    * @returns {boolean}
    */
   abortRound(reason = "Round aborted") {
+    this.status = "paused";
+    let aborted = false;
+    if (this._roundAbortController && !this._roundAbortController.signal.aborted) {
+      this._roundAbortController.abort(new Error(reason));
+      aborted = true;
+    }
     if (this._activeTurnController) {
       this._activeTurnController.abort(new Error(reason));
       this._activeTurnController = null;
-      return true;
+      aborted = true;
     }
-    return false;
+    return aborted;
   }
 
   cancelActiveTurn(reason = "Turn cancelled") {
@@ -930,7 +942,7 @@ export class Room {
   }
 
   evalForwardProgress(result, ctx = {}) {
-    return evalForwardProgress(result, { ...ctx, room: this });
+    return evalForwardProgress(result, { ...ctx, room: this, _round_turn_fingerprints: this._round_turn_fingerprints });
   }
 
   detectInfiniteLoop(turn) {
@@ -964,10 +976,17 @@ export class Room {
     this.last_round_id = roundId;
     this.round_running += 1;
     this.pending_rounds = Math.max(0, this.pending_rounds - 1);
+    this.relays = 0;
+    if (this.settings?.base_relay_limit) {
+      this.relay_limit = Number(this.settings.base_relay_limit);
+    } else if (this.relay_limit == null) {
+      this.relay_limit = this.base_relay_limit;
+    }
+    this.consecutive_stagnant_turns = 0;
     this.system_notices = [];
     this._round_tool_history = [];
     this._round_turn_fingerprints = [];
-    this.consecutive_stagnant_turns = 0;
+    this._roundAbortController = new AbortController();
     // Load undrained notices for this round (file moves, sub-group reports, ...).
     try {
       const notices = this.store?.drainNotices?.(this.room_id) || [];
@@ -1012,6 +1031,10 @@ export class Room {
     try {
       while (guard < maxTurns) {
         guard += 1;
+        if (this._roundAbortController?.signal.aborted || this.status === "paused") {
+          paused = true;
+          break;
+        }
         // fanout 拓扑序优先（写域/依赖决定先后），未纳入计划的成员回落到分派顺序。
         for (const planned of this.taskPlanBotOrder()) {
           if ((this.pending_assignments[planned] || []).length && !assignmentOrder.includes(planned)) {
@@ -1046,7 +1069,7 @@ export class Room {
 
         if (!this.members.includes(nextId)) continue;
         if (this.permissionsOf(nextId).can_speak === false) continue;
-        if (this.status === "paused") {
+        if (this._roundAbortController?.signal.aborted || this.status === "paused") {
           paused = true;
           break;
         }
@@ -1327,6 +1350,7 @@ export class Room {
     } finally {
       this.round_running = Math.max(0, this.round_running - 1);
       this._activeTurnController = null;
+      this._roundAbortController = null;
       await this.emit("round_completed", {
         round_id: roundId,
         speakers: spoken,

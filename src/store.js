@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS usage(
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
   cache_write_tokens INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_usage_room ON usage(room_id);
+CREATE INDEX IF NOT EXISTS idx_usage_bot ON usage(bot_id);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
 `;
 
 function nowIso() {
@@ -163,6 +166,10 @@ export class Store {
     addColumn("usage", "tps", "tps REAL NOT NULL DEFAULT 0.0");
     addColumn("usage", "cache_read_tokens", "cache_read_tokens INTEGER NOT NULL DEFAULT 0");
     addColumn("usage", "cache_write_tokens", "cache_write_tokens INTEGER NOT NULL DEFAULT 0");
+    // 索引加速长任务与历史遥测查询
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_room ON usage(room_id)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_bot ON usage(bot_id)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts)");
   }
 
   close() {
@@ -377,9 +384,17 @@ export class Store {
   }
 
   listRoomMessages(roomId, limit = 500) {
-    const rows = this.prepare("SELECT * FROM room_messages WHERE room_id = ? ORDER BY seq ASC").all(String(roomId));
-    const sliced = limit && rows.length > limit ? rows.slice(-limit) : rows;
-    return sliced.map((r) => ({
+    let rows;
+    if (limit && Number(limit) > 0) {
+      rows = this.prepare(`
+        SELECT * FROM (
+          SELECT * FROM room_messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?
+        ) ORDER BY seq ASC
+      `).all(String(roomId), Number(limit));
+    } else {
+      rows = this.prepare("SELECT * FROM room_messages WHERE room_id = ? ORDER BY seq ASC").all(String(roomId));
+    }
+    return rows.map((r) => ({
       room_id: r.room_id,
       seq: Number(r.seq),
       speaker: r.speaker,
@@ -537,7 +552,9 @@ export class Store {
 
   addUsage({
     bot_id = null,
+    botId = null,
     room_id = null,
+    roomId = null,
     model = null,
     input_tokens = 0,
     output_tokens = 0,
@@ -547,12 +564,14 @@ export class Store {
     ttft_ms = 0,
     tps = 0,
   } = {}) {
+    const finalBotId = bot_id ?? botId;
+    const finalRoomId = room_id ?? roomId;
     this.prepare(
       `INSERT INTO usage(bot_id, room_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, ms, ttft_ms, tps, ts)
        VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
-      bot_id ? String(bot_id) : null,
-      room_id ? String(room_id) : null,
+      finalBotId ? String(finalBotId) : null,
+      finalRoomId ? String(finalRoomId) : null,
       model ? String(model) : null,
       Number(input_tokens) || 0,
       Number(output_tokens) || 0,
@@ -565,7 +584,9 @@ export class Store {
     );
   }
 
-  usageSummary({ allFields = false } = {}) {
+  usageSummary({ allFields = false, roomId = null } = {}) {
+    const whereClause = roomId ? "WHERE room_id = ?" : "";
+    const params = roomId ? [String(roomId)] : [];
     const totals = this.prepare(`
       SELECT COUNT(*) AS calls,
              COALESCE(SUM(input_tokens),0) AS input,
@@ -576,7 +597,8 @@ export class Store {
              COALESCE(AVG(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE NULL END), 0) AS avg_ttft_ms,
              COALESCE(AVG(CASE WHEN tps > 0 THEN tps ELSE NULL END), 0) AS avg_tps
         FROM usage
-    `).get();
+        ${whereClause}
+    `).get(...params);
 
     const calls = Number(totals.calls || 0);
     if (calls === 0 && !allFields) {
@@ -601,9 +623,10 @@ export class Store {
              COALESCE(AVG(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE NULL END), 0) AS avg_ttft_ms,
              COALESCE(AVG(CASE WHEN tps > 0 THEN tps ELSE NULL END), 0) AS avg_tps
         FROM usage
+        ${whereClause}
        GROUP BY bot_id
        ORDER BY calls DESC
-    `).all();
+    `).all(...params);
 
     return {
       calls,

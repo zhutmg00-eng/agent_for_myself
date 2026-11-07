@@ -86,6 +86,13 @@ export function clampToolOutput(rawText, options = {}) {
     spillPath = path.join(tempDir, fileName);
     assertNotC(spillPath, "tool output spill file");
     fs.writeFileSync(spillPath, text, "utf8");
+
+    // Opportunistically prune oldest logs in tool_outputs
+    try {
+      pruneSpillFiles({ maxFiles: 50 });
+    } catch {
+      /* prune is best-effort */
+    }
   } catch (err) {
     /* temp write is best-effort */
   }
@@ -122,4 +129,59 @@ export function clampToolOutput(rawText, options = {}) {
     spillPath,
     fileId,
   };
+}
+
+/**
+ * Prune oldest spillover tool output logs to maintain bounded storage.
+ * @param {{ maxFiles?: number, maxAgeMs?: number, maxTotalBytes?: number }} [options]
+ * @returns {number} Count of pruned files
+ */
+export function pruneSpillFiles({
+  maxFiles = 50,
+  maxAgeMs = 24 * 3600 * 1000,
+  maxTotalBytes = 50 * 1024 * 1024,
+} = {}) {
+  try {
+    const tempDir = path.join(DIRS.temp, "tool_outputs");
+    assertNotC(tempDir, "tool outputs dir");
+    if (!fs.existsSync(tempDir)) return 0;
+
+    const entries = fs.readdirSync(tempDir)
+      .filter((name) => name.endsWith(".log"))
+      .map((name) => {
+        const fullPath = path.join(tempDir, name);
+        try {
+          const stat = fs.statSync(fullPath);
+          return { fullPath, mtimeMs: stat.mtimeMs, size: stat.size };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
+
+    let pruned = 0;
+    const now = Date.now();
+    let totalBytes = entries.reduce((sum, e) => sum + e.size, 0);
+
+    for (const entry of entries) {
+      const expired = maxAgeMs != null && (now - entry.mtimeMs > maxAgeMs);
+      const exceedsCount = maxFiles != null && (entries.length - pruned > maxFiles);
+      const exceedsSize = maxTotalBytes != null && (totalBytes > maxTotalBytes);
+
+      if (expired || exceedsCount || exceedsSize) {
+        try {
+          assertNotC(entry.fullPath, "prune spill file");
+          fs.unlinkSync(entry.fullPath);
+          pruned += 1;
+          totalBytes -= entry.size;
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+    return pruned;
+  } catch {
+    return 0;
+  }
 }

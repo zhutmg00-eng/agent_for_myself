@@ -51,7 +51,7 @@ describe("Live Magpie Gateway & DeepSeek Integration", () => {
     );
   });
 
-  test("2. Direct chat completion via Magpie gateway routes to DeepSeek", async (t) => {
+  test("2. Direct streaming chat completion via Magpie gateway routes to DeepSeek", async (t) => {
     if (!gatewayOnline) {
       t.skip("Magpie gateway is not running on http://127.0.0.1:3425");
       return;
@@ -61,8 +61,15 @@ describe("Live Magpie Gateway & DeepSeek Integration", () => {
     const body = {
       model: targetModel,
       messages: [{ role: "user", content: "Ping from automated live test. Reply with: PONG_MAGPIE" }],
-      max_tokens: 60,
+      stream: true,
+      stream_options: { include_usage: true },
     };
+
+    const t0 = Date.now();
+    let ttft = 0;
+    let tokens = 0;
+    let fullText = "";
+    let usage = null;
 
     const res = await fetch(`${GATEWAY_ORIGIN}/v1/chat/completions`, {
       method: "POST",
@@ -71,11 +78,46 @@ describe("Live Magpie Gateway & DeepSeek Integration", () => {
     });
 
     assert.equal(res.status, 200, `Expected HTTP 200 from Magpie chat completions, got ${res.status}`);
-    const data = await res.json();
-    assert.ok(data.choices && data.choices.length > 0, "Expected at least one completion choice");
-    const reply = data.choices[0].message?.content || "";
-    assert.ok(reply.length > 0, "Completion message content should not be empty");
-    assert.ok(data.usage?.total_tokens > 0, "Usage total_tokens should be recorded");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let pos;
+      while ((pos = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, pos).trim();
+        buffer = buffer.slice(pos + 1);
+        if (!line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6).trim();
+        if (dataStr === "[DONE]") continue;
+        try {
+          const json = JSON.parse(dataStr);
+          if (json.usage) usage = json.usage;
+          const delta = json.choices?.[0]?.delta?.content || "";
+          if (delta) {
+            if (!ttft) ttft = Date.now() - t0;
+            fullText += delta;
+            tokens++;
+          }
+        } catch {
+          // ignore parse errors for partial lines
+        }
+      }
+    }
+
+    const totalMs = Date.now() - t0;
+    const genMs = Math.max(1, totalMs - ttft);
+    const completionTokens = usage?.completion_tokens || tokens;
+    const tps = genMs > 0 ? (completionTokens / (genMs / 1000)) : 0;
+
+    console.log(`[Magpie Live] Model: ${targetModel} | TTFT: ${ttft}ms | Gen Duration: ${genMs}ms | TPS: ${tps.toFixed(1)} tok/s | Tokens: ${completionTokens}`);
+
+    assert.ok(fullText.length > 0, "Completion message content should not be empty");
+    assert.ok(ttft > 0, "TTFT should be measured");
+    assert.ok(completionTokens > 0, "Completion tokens should be > 0");
   });
 
   test("3. AgentFusion BotRunner executes a real turn through Magpie + DeepSeek", async (t) => {
@@ -103,9 +145,41 @@ describe("Live Magpie Gateway & DeepSeek Integration", () => {
     assert.ok(!result.error, `Turn error should be undefined, got: ${result.error}`);
     assert.ok(result.text && result.text.length > 0, "Turn should produce non-empty response text");
     assert.ok(result.usage && result.usage.total > 0, "Turn should record non-zero token usage");
+    console.log(`[Magpie Live] BotRunner Turn completed: "${result.text.trim()}" (${result.usage.total} tokens, ${result.telemetry?.durationMs || "n/a"}ms)`);
   });
 
-  test("4. Room multi-agent orchestrates a live round routed via Magpie + DeepSeek", async (t) => {
+  test("4. AgentFusion BotRunner maintains multi-turn context with DeepSeek", async (t) => {
+    if (!gatewayOnline) {
+      t.skip("Magpie gateway is not running on http://127.0.0.1:3425");
+      return;
+    }
+
+    const targetModel = availableModels.includes(WORKBUDDY_MODEL) ? WORKBUDDY_MODEL : OPENCODE_MODEL;
+    process.env.FUSION_MODEL = targetModel;
+
+    const dbPath = path.join(TEST_DATA_ROOT, "data", `live_mt_${Date.now()}.db`);
+    assertNotC(dbPath, "test db");
+    const store = new Store(dbPath);
+    onCleanup(() => store.close());
+
+    const engine = await createEngine({ store, gatewayUrl: GATEWAY_URL });
+    const bot = createBotRunner({
+      engine,
+      store,
+      bot: { id: "live_mt_agent", persona: "You are an accurate memory test agent." },
+    });
+
+    const res1 = await bot.run({ prompt: "The secret codeword is ATLAS-99. Acknowledge briefly." });
+    assert.ok(!res1.error, `Turn 1 error: ${res1.error}`);
+    assert.ok(res1.text.length > 0, "Turn 1 text expected");
+
+    const res2 = await bot.run({ prompt: "What is the secret codeword? Answer with just the codeword." });
+    assert.ok(!res2.error, `Turn 2 error: ${res2.error}`);
+    assert.match(res2.text, /ATLAS-99/, "Expected model to recall the codeword from prior turn");
+    console.log(`[Magpie Live] Multi-turn recall confirmed: "${res2.text.trim()}" (Turn 1: ${res1.usage?.total} tokens, Turn 2: ${res2.usage?.total} tokens)`);
+  });
+
+  test("5. Room multi-agent orchestrates a live round routed via Magpie + DeepSeek", async (t) => {
     if (!gatewayOnline) {
       t.skip("Magpie gateway is not running on http://127.0.0.1:3425");
       return;
@@ -154,5 +228,6 @@ describe("Live Magpie Gateway & DeepSeek Integration", () => {
     assert.ok(roundCompleted, "round_completed event should be triggered");
     assert.ok(room._round_turns.length >= 1, "Expected at least 1 member turn executed");
     assert.ok(room._round_turns[0].text.length > 0, "Turn should produce response from DeepSeek");
+    console.log(`[Magpie Live] Room round completed with ${room._round_turns.length} turns, turn 1 response: "${room._round_turns[0].text.trim()}"`);
   });
 });

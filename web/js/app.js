@@ -3,7 +3,7 @@
 import {
   state, boot, subscribe, emit, openRoom, openChief, openBot, createRoom,
   roomLastPreview, roomTitle, profileOf, refreshRooms, refreshBots, refreshContext,
-  sortedRooms, refreshHealth, pendingApprovalCount,
+  sortedRooms, refreshHealth, pendingApprovalCount, applyTheme,
 } from "./store.js";
 import { avatar, groupAvatar, profileFor, escapeHtml } from "./avatars.js";
 import {
@@ -21,10 +21,18 @@ let currentKey = "";
 let inspectorKey = "";
 let inspectorSig = "";
 
+const SIDEBAR_STORAGE_KEY = "agent_fusion:sidebar_mode";
+
 const els = {};
 
 function cacheEls() {
   els.app = $("#app");
+  els.sidebar = $("#sidebar");
+  els.btnToggleSidebar = $("#btn-toggle-sidebar");
+  els.sideConnBadge = $("#side-conn-badge");
+  els.sideConnDot = $("#side-conn-dot");
+  els.sideConnText = $("#side-conn-text");
+  els.btnThemeToggle = $("#btn-theme-toggle");
   els.roomList = $("#room-list");
   els.botList = $("#bot-list");
   els.roomEmpty = $("#room-empty");
@@ -40,13 +48,45 @@ function cacheEls() {
   els.approvalBadge = $("#approval-badge");
 }
 
+function initSidebarMode() {
+  let mode = "expanded";
+  try {
+    mode = localStorage.getItem(SIDEBAR_STORAGE_KEY) || (window.innerWidth < 900 ? "rail" : "expanded");
+  } catch (_) {}
+  setSidebarMode(mode, false);
+}
+
+function setSidebarMode(mode, persist = true) {
+  const isRail = mode === "rail";
+  els.sidebar?.classList.toggle("is-rail", isRail);
+  if (els.sidebar) els.sidebar.dataset.mode = mode;
+  if (els.btnToggleSidebar) {
+    els.btnToggleSidebar.setAttribute("aria-expanded", isRail ? "false" : "true");
+    els.btnToggleSidebar.title = isRail ? "展开侧边栏（Ctrl+B）" : "折叠侧边栏（Ctrl+B）";
+  }
+  if (persist) {
+    try { localStorage.setItem(SIDEBAR_STORAGE_KEY, mode); } catch (_) {}
+  }
+}
+
+function toggleSidebar() {
+  const isRail = els.sidebar?.classList.contains("is-rail");
+  setSidebarMode(isRail ? "expanded" : "rail");
+}
+
 function bindShell() {
+  initSidebarMode();
+  els.btnToggleSidebar?.addEventListener("click", toggleSidebar);
   els.chiefCard.addEventListener("click", () => openChief());
   $("#btn-new").addEventListener("click", openNewGroup);
   $("#btn-new-room").addEventListener("click", openNewGroup);
   $("#btn-settings").addEventListener("click", () => openSettings());
   $("#btn-usage").addEventListener("click", () => openSettings({ tab: "usage" }));
   $("#btn-search").addEventListener("click", openSearch);
+  els.btnThemeToggle?.addEventListener("click", () => {
+    const next = state.theme === "dark" ? "light" : "dark";
+    applyTheme(next);
+  });
 
   els.roomList.addEventListener("click", (ev) => {
     const row = ev.target.closest("[data-room-id]");
@@ -64,7 +104,13 @@ function bindShell() {
     const mod = ev.ctrlKey || ev.metaKey;
     if (mod && ev.key.toLowerCase() === "k") { ev.preventDefault(); openSearch(); }
     if (mod && ev.key.toLowerCase() === "n") { ev.preventDefault(); openNewGroup(); }
+    if (mod && ev.key.toLowerCase() === "b") { ev.preventDefault(); toggleSidebar(); }
     if (mod && ev.key === ",") { ev.preventDefault(); openSettings(); }
+    if (ev.key === "Escape" && state.inspector && !document.querySelector(".modal-backdrop")) {
+      state.inspector = null;
+      renderInspector(true);
+      document.dispatchEvent(new CustomEvent("ah:inspector", { detail: null }));
+    }
   });
 
   const hw = window.harnessWindow;
@@ -91,7 +137,7 @@ function renderSidebar() {
     const owner = profileOf(room.owner_id);
     const unread = state.unread[room.room_id] || 0;
     const sub = (room.parent_room_id ? "小群 · " : "") + (preview || `${(room.members || []).length} 位成员 · 群主 ${owner.name}`);
-    return `<button class="room-row${active ? " is-active" : ""}" data-room-id="${escapeAttr(room.room_id)}">
+    return `<button class="room-row${active ? " is-active" : ""}" data-room-id="${escapeAttr(room.room_id)}" data-tooltip="${escapeAttr(roomTitle(room))}" title="${escapeAttr(roomTitle(room))}">
       ${groupAvatar(room, 34, state.botsById)}
       <span class="room-copy"><span class="room-name">${escapeHtml(roomTitle(room))}</span><span class="room-sub">${escapeHtml(sub)}</span></span>
       ${unread ? `<span class="room-unread">${unread > 99 ? "99+" : unread}</span>` : ""}
@@ -103,7 +149,7 @@ function renderSidebar() {
     const p = profileFor(bot.id, bot);
     const active = state.view.type === "bot" && state.view.id === bot.id;
     const sub = p.tagline && p.tagline.startsWith(p.role) ? p.tagline : `${p.role} · ${p.tagline}`;
-    return `<button class="bot-row${active ? " is-active" : ""}" data-bot-id="${escapeAttr(bot.id)}">
+    return `<button class="bot-row${active ? " is-active" : ""}" data-bot-id="${escapeAttr(bot.id)}" data-tooltip="${escapeAttr(p.name)} · ${escapeAttr(p.role)}" title="${escapeAttr(p.name)}">
       ${avatar(bot.id, 28)}
       <span class="bot-copy"><span class="bot-name">${escapeHtml(p.name)}</span><span class="bot-sub">${escapeHtml(sub)}</span></span>
       <span class="bot-state${bot.state === "working" ? " working" : ""}"></span>
@@ -122,9 +168,21 @@ function renderSidebar() {
     els.approvalBadge.title = `${pending} 条审批待裁决`;
   }
 
+  const connState = state.connected ? "connected" : state.connecting ? "syncing" : "offline";
+  els.connPill.dataset.state = connState;
   els.connPill.classList.toggle("ok", state.connected);
+  els.connPill.classList.toggle("syncing", state.connecting);
   els.connPill.classList.toggle("bad", !state.connected && !state.connecting);
   els.connText.textContent = state.connected ? "已连接" : state.connecting ? "重连中" : "离线";
+
+  if (els.sideConnBadge) {
+    els.sideConnBadge.classList.toggle("ok", state.connected);
+    els.sideConnBadge.classList.toggle("bad", !state.connected && !state.connecting);
+    els.sideConnBadge.classList.toggle("syncing", state.connecting);
+  }
+  if (els.sideConnText) {
+    els.sideConnText.textContent = state.connected ? "已连接" : state.connecting ? "重连中" : "离线";
+  }
 }
 
 /* Footer model label — backend model ids look like "magpie/xxx" or
@@ -176,7 +234,7 @@ function renderInspector(force = false) {
     inspectorSig = "";
     return;
   }
-  const key = `${insp.type}:${insp.id || ""}:${insp.tab || ""}`;
+  const key = `${insp.type}:${insp.id || ""}:${insp.tab || ""}:${insp.member || ""}`;
   let sig = key;
   if (insp.type === "group") {
     const room = state.roomById[insp.id];
@@ -186,6 +244,7 @@ function renderInspector(force = false) {
       title: room.title,
       policy: room.context_policy,
       perms: room.member_permissions,
+      selectedMember: insp.member || null,
       files: (state.files[insp.id] || []).map((f) => [f.file_id, f.path, f.description]),
       subs: state.rooms.filter((r) => r.parent_room_id === insp.id).map((r) => r.room_id),
       // 证据阶梯汇总后到：签入 sig 才能在汇总到达后重绘检查器。
@@ -200,9 +259,10 @@ function renderInspector(force = false) {
   inspectorKey = key;
   inspectorSig = sig;
   els.inspector.hidden = false;
+  els.inspector.classList.add("inspector-drawer");
   if (insp.type === "group") {
-    els.inspector.innerHTML = groupInspectorHTML(insp.id, insp.tab || "members");
-    bindGroupInspector(els.inspector, insp.id, insp.tab, () => renderInspector(true));
+    els.inspector.innerHTML = groupInspectorHTML(insp.id, insp.tab || "members", insp.member);
+    bindGroupInspector(els.inspector, insp.id, insp.tab, () => renderInspector(true), insp.member);
   } else if (insp.type === "chief") {
     els.inspector.innerHTML = chiefInspectorHTML();
     bindInspectorCommon();
@@ -213,6 +273,7 @@ function bindInspectorCommon() {
   $("[data-insp-close]", els.inspector)?.addEventListener("click", () => {
     state.inspector = null;
     renderInspector(true);
+    document.dispatchEvent(new CustomEvent("ah:inspector", { detail: null }));
   });
 }
 

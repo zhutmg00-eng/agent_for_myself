@@ -1,4 +1,4 @@
-/* Settings — single modal, five sections, DS-Bot-like density. */
+/* Settings — modern multi-tab modal (Milestone 2 Architecture). */
 
 import { api } from "../api.js";
 import {
@@ -11,18 +11,16 @@ import {
   ICONS, $, $$, toast, formatTokens, escapeAttr, pickAvatarFile, fileToAvatarDataUrl, relTime, formatTime,
 } from "../ui.js";
 
-const NAV = [
+export const NAV = [
   { id: "general", label: "通用", icon: ICONS.settings },
-  { id: "bots", label: "机器人", icon: ICONS.users },
-  { id: "capabilities", label: "能力", icon: ICONS.tool },
-  { id: "proposals", label: "提案", icon: ICONS.spark },
   { id: "approvals", label: "审批", icon: ICONS.bell },
-  { id: "usage", label: "用量", icon: ICONS.chart },
+  { id: "skills", label: "技能与提案", icon: ICONS.tool },
+  { id: "memory", label: "记忆", icon: ICONS.spark },
+  { id: "usage", label: "用量与遥测", icon: ICONS.chart },
+  { id: "bots", label: "机器人", icon: ICONS.users },
   { id: "about", label: "关于", icon: ICONS.info },
 ];
 
-/* 审批档位：顺序与后端 APPROVAL_MODES 一致（宽松 → 严格）。说明文案取自
- * src/approval.js 的 decideByMode，避免界面承诺后端没有的行为。 */
 const APPROVAL_MODES = [
   { id: "yolo", label: "yolo", desc: "全部放行，只有硬地板（如 rm -rf /）仍会被拒绝" },
   { id: "smart", label: "smart", desc: "只读、工作区内写入、构建测试自动放行；写/删/网络/系统命令问审批" },
@@ -36,8 +34,6 @@ const APPROVAL_SCOPES = [
 const SCOPE_LABEL = { once: "一次", session: "本会话", always: "永久", floor: "硬地板", breaker: "拒绝熔断", timeout: "超时" };
 const DECISION_LABEL = { allow: "批准", deny: "拒绝" };
 
-/* 技能提案（E27 学习闭环）：review 只接受 adopt/reject/defer，状态由后端推导
- * （approved/rejected/deferred/adopted），前端只做展示映射，不自己猜状态。 */
 const PROPOSAL_STATUS = {
   proposed: { label: "待评审", cls: "proposed" },
   approved: { label: "已通过", cls: "approved" },
@@ -56,19 +52,24 @@ let escHandler = null;
 
 export function openSettings(opts = {}) {
   closeSettings();
-  let tab = opts.tab || "general";
+  let rawTab = opts.tab || "general";
+  if (rawTab === "capabilities" || rawTab === "proposals") rawTab = "skills";
+  if (rawTab === "telemetry") rawTab = "usage";
+  let tab = rawTab;
   let selectedBot = opts.botId || "ChiefRouter";
 
   const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop";
+  backdrop.className = "modal-backdrop settings-backdrop";
   backdrop.innerHTML = `<div class="settings-modal" role="dialog" aria-modal="true"></div>`;
-  document.querySelector("#modal-root").appendChild(backdrop);
+  const modalRoot = document.querySelector("#modal-root") || document.body;
+  modalRoot.appendChild(backdrop);
   const shell = backdrop.querySelector(".settings-modal");
 
   const close = () => {
     state.skillProposals.open = false;
     if (escHandler) document.removeEventListener("keydown", escHandler);
     escHandler = null;
+    backdrop.style.pointerEvents = "none";
     backdrop.style.animation = "fade-in .12s reverse";
     setTimeout(() => backdrop.remove(), 120);
   };
@@ -76,15 +77,12 @@ export function openSettings(opts = {}) {
   document.addEventListener("keydown", escHandler);
   backdrop.addEventListener("mousedown", (ev) => { if (ev.target === backdrop) close(); });
 
-  /* 审批数据不订阅 SSE 重渲染（弹窗自己管节奏），所以进入/回到「审批」分区时
-   * 主动补一次；3 秒内刚拉过就跳过，避免 refresh → rerender → refresh 自激。 */
   const ensureApprovals = () => {
     const at = Date.parse(state.approvals?.at || "") || 0;
     if (Date.now() - at < 3000) return;
     refreshApprovals().then(() => render()).catch(() => render());
   };
 
-  /* 技能提案同理：进入分区时补一次，3 秒内刚拉过就跳过（避免自激）。 */
   const ensureProposals = () => {
     const at = Date.parse(state.skillProposals?.at || "") || 0;
     if (Date.now() - at < 3000) return;
@@ -92,13 +90,13 @@ export function openSettings(opts = {}) {
   };
 
   const render = () => {
-    state.skillProposals.open = tab === "proposals";
+    state.skillProposals.open = tab === "skills";
     const content = contentFor(tab, selectedBot, { close, rerender: render, setTab: (t) => { tab = t; render(); }, setBot: (id) => { selectedBot = id; render(); } });
     const pending = pendingApprovalCount();
     const proposed = Number(state.skillProposals?.report?.proposed || 0);
     const badgeFor = (n) => {
       if (n.id === "approvals" && pending) return `<span class="nav-count">${pending > 99 ? "99+" : pending}</span>`;
-      if (n.id === "proposals" && proposed) return `<span class="nav-count">${proposed > 99 ? "99+" : proposed}</span>`;
+      if (n.id === "skills" && proposed) return `<span class="nav-count">${proposed > 99 ? "99+" : proposed}</span>`;
       return "";
     };
     shell.innerHTML = `
@@ -114,15 +112,18 @@ export function openSettings(opts = {}) {
     $("[data-settings-close]", shell)?.addEventListener("click", close);
     bindContent(shell, { close, rerender: render, tab, selectedBot, setBot: (id) => { selectedBot = id; render(); } });
     if (tab === "approvals") ensureApprovals();
-    if (tab === "proposals") ensureProposals();
+    if (tab === "skills") ensureProposals();
   };
   render();
   return { close };
 }
 
-function closeSettings() {
+export function closeSettings() {
   document.querySelectorAll(".modal-backdrop").forEach((el) => {
-    if (el.querySelector(".settings-modal")) el.remove();
+    if (el.querySelector(".settings-modal")) {
+      el.style.pointerEvents = "none";
+      el.remove();
+    }
   });
   if (escHandler) document.removeEventListener("keydown", escHandler);
   escHandler = null;
@@ -134,16 +135,14 @@ function header(title, sub) {
 
 function contentFor(tab, selectedBot, ctx) {
   if (tab === "general") return generalTab();
-  if (tab === "bots") return botsTab(selectedBot, ctx);
-  if (tab === "capabilities") return capabilitiesTab();
-  if (tab === "proposals") return proposalsTab();
   if (tab === "approvals") return approvalsTab();
+  if (tab === "skills") return skillsTab();
+  if (tab === "memory") return memoryTab();
   if (tab === "usage") return usageTab();
+  if (tab === "bots") return botsTab(selectedBot, ctx);
   return aboutTab();
 }
 
-/* Engine panel — the pi kernel, gateway, data roots and the live model
- * catalogue (/api/models → {object,data,current_model,gateway_url}). */
 function engineSection() {
   const s = state.settings || {};
   const h = state.health || {};
@@ -202,7 +201,7 @@ function generalTab() {
     <div class="settings-body">
       ${engineSection()}
       <div class="settings-section">
-        <h3>模型</h3>
+        <h3>模型与服务</h3>
         <div class="set-card">
           <div class="set-row">
             <div class="set-copy"><div class="set-name">默认模型</div><div class="set-desc">所有成员与 Chief 共用；可在机器人页单独覆盖</div></div>
@@ -228,7 +227,7 @@ function generalTab() {
       </div>
 
       <div class="settings-section">
-        <h3>个人</h3>
+        <h3>个人身份</h3>
         <div class="set-card">
           <div class="set-row">
             <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
@@ -244,106 +243,20 @@ function generalTab() {
       </div>
 
       <div class="settings-section">
-        <h3>界面</h3>
+        <h3>外观与主题</h3>
         <div class="set-card">
           <div class="set-row">
-            <div class="set-copy"><div class="set-name">外观</div><div class="set-desc">跟随你的使用环境，深浅两套表面</div></div>
+            <div class="set-copy"><div class="set-name">主题模式</div><div class="set-desc">跟随你的使用环境，深浅两套表面</div></div>
             <div class="seg" style="width:180px" id="set-theme">
               <button data-theme-val="light" class="${state.theme === "light" ? "is-on" : ""}">浅色</button>
               <button data-theme-val="dark" class="${state.theme === "dark" ? "is-on" : ""}">深色</button>
             </div>
           </div>
-          <div class="set-row">
-            <div class="set-copy"><div class="set-name">群聊默认上下文</div><div class="set-desc">新建群聊时的默认共享策略</div></div>
-            <div class="set-value">共享全文</div>
-          </div>
         </div>
       </div>
     </div>`;
 }
 
-function botsTab(selectedBot, ctx) {
-  const bots = state.bots || [];
-  const bot = bots.find((b) => b.id === selectedBot) || bots[0] || { id: "ChiefRouter" };
-  const p = profileFor(bot.id, bot);
-  const models = state.models || [];
-  const modelOpts = models.map((m) => `<option value="${escapeAttr(m.id)}" ${m.id === bot.model ? "selected" : ""}>${escapeHtml(m.display_name || m.id)}</option>`).join("");
-  return `
-    ${header("机器人", "身份、模型与工具权限")}
-    <div class="settings-body">
-      <div class="bot-layout">
-        <div class="bot-side">
-          ${bots.map((b) => {
-            const bp = profileFor(b.id, b);
-            return `<button class="bot-side-row${b.id === bot.id ? " is-on" : ""}" data-bot-id="${escapeAttr(b.id)}">
-              ${avatar(b.id, 28)}
-              <span class="bot-side-copy"><span class="bot-name">${escapeHtml(bp.name)}</span><span class="bot-sub">${escapeHtml(bp.role)}</span></span>
-            </button>`;
-          }).join("")}
-        </div>
-        <div class="bot-edit">
-          <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
-            ${avatar(bot.id, 56)}
-            <div style="min-width:0;flex:1">
-              <div style="font-size:16px;font-weight:600">${escapeHtml(p.name)}</div>
-              <div class="set-desc">${escapeHtml(p.tagline && p.tagline.startsWith(p.role) ? p.tagline : `${p.role} · ${p.tagline}`)}</div>
-              <div style="display:flex;gap:6px;margin-top:8px">
-                <button class="btn sm" id="b-avatar">更换头像</button>
-                <button class="btn sm ghost" id="b-avatar-reset">恢复默认</button>
-              </div>
-            </div>
-          </div>
-          <div class="field"><label>显示名称</label><input class="input" id="b-name" value="${escapeAttr(p.name)}"></div>
-          <div class="field"><label>身份签名</label><input class="input" id="b-tagline" value="${escapeAttr(p.tagline)}" placeholder="用一句话说明它负责什么"></div>
-          <div class="field"><label>模型</label><select class="select" id="b-model">${modelOpts || `<option>${escapeHtml(bot.model || "")}</option>`}</select></div>
-          <div class="field"><label>思考强度</label><select class="select" id="b-thinking">${["off", "low", "medium", "high"].map((lv) => `<option value="${lv}"${(bot.thinking_level || "off") === lv ? " selected" : ""}>${({ off: "关闭（最快）", low: "低", medium: "中", high: "高（最稳）" })[lv]}</option>`).join("")}</select></div>
-          <div class="field"><label>系统提示词</label><textarea class="textarea" id="b-prompt" rows="5">${escapeHtml(bot.system_prompt || "")}</textarea></div>
-          <div class="field"><label>已挂载工具</label><div style="display:flex;flex-wrap:wrap;gap:5px">${(bot.allowed_tools || []).map((t) => `<span class="tag" style="height:22px;font-family:var(--mono);font-size:10.5px">${escapeHtml(t)}</span>`).join("") || `<span class="set-desc">无</span>`}</div></div>
-          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
-            <button class="btn primary sm" id="b-save">保存机器人设置</button>
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-function capabilitiesTab() {
-  const skills = state.skills || [];
-  const hooks = state.hooks || {};
-  const pre = hooks.PreToolUse || [];
-  const post = hooks.PostToolUse || [];
-  return `
-    ${header("能力", "Skills 与 Hooks")}
-    <div class="settings-body">
-      <div class="settings-section">
-        <h3>Skills 技能库 · ${skills.length}</h3>
-        <div class="set-card">
-          ${skills.map((s) => `<div class="skill-card">
-            <div class="skill-top"><span class="skill-name">${escapeHtml(s.name)}</span><span class="tag ${s.source === "workspace" ? "accent" : ""}">${s.source === "workspace" ? "工作区" : "内置"}</span></div>
-            <div class="skill-desc">${escapeHtml(s.description || "")}</div>
-            <div class="skill-when">${escapeHtml(s.when_to_use || "")}</div>
-          </div>`).join("") || `<div class="empty-mini">还没有技能。把 SKILL.md 放到工作区 .agentharness/skills/ 下即可。</div>`}
-        </div>
-      </div>
-      <div class="settings-section">
-        <h3>Hooks 治理</h3>
-        <div class="set-card">
-          ${[...pre.map((h) => ({ ...h, kind: "PreToolUse" })), ...post.map((h) => ({ ...h, kind: "PostToolUse" }))].map((h) => `<div class="hook-row">
-            <span class="hook-kind">${h.kind}</span>
-            <div class="hook-body"><div class="hook-name">${escapeHtml(h.matcher || "*")} → ${escapeHtml(h.action || "")}</div><div class="hook-detail">${escapeHtml(h.reason || "无备注")}</div></div>
-          </div>`).join("") || `<div class="empty-mini">没有配置 Hook。</div>`}
-          <div class="set-row">
-            <div class="set-copy"><div class="set-name">配置来源</div><div class="set-desc">${escapeHtml(hooks.config_path || "")}</div></div>
-            <button class="btn sm" id="hooks-reload">${ICONS.refresh} 重新加载</button>
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-/* 审批 — 模式、待裁决列表与最近审计（端点见 src/api/server.js E26）。
- * scope 语义：once 用掉即失效、session 在本 (roomId,botId) 内按 patternKey 放行、
- * always 写进 appr_cache 且跨重启生效；拒绝会累计熔断计数（默认连续 3 次）。 */
 function approvalsTab() {
   const a = state.approvals || {};
   const mode = APPROVAL_MODES.some((m) => m.id === a.mode) ? a.mode : "yolo";
@@ -456,54 +369,61 @@ function auditRowHTML(r) {
   </div>`;
 }
 
-/* 技能提案（E27 学习闭环）：真实回合里由 curator 自动 propose，人工 review 后
- * adopt 落盘。两段式采纳见 adoptSkillProposal（review(adopt) → adopt），
- * guard 只会在 adopt 阶段拦，界面必须把拒绝原因原样展示。 */
-function proposalsTab() {
+function skillsTab() {
+  const skills = state.skills || [];
+  const hooks = state.hooks || {};
+  const pre = hooks.PreToolUse || [];
+  const post = hooks.PostToolUse || [];
   const s = state.skillProposals || {};
   const proposals = Array.isArray(s.proposals) ? s.proposals : [];
   const report = s.report || {};
   const status = s.status || "";
-  const updated = s.at ? `上次刷新 ${relTime(s.at)}` : "尚未刷新";
   const counts = {};
   for (const filter of PROPOSAL_FILTERS) counts[filter.id] = Number(report[filter.key] || 0);
+
   return `
-    ${header("技能提案", "学习闭环：把真实回合里总结出的 playbook 变成可复用技能")}
+    ${header("技能与提案", "技能库、Hooks 治理与 E27 学习闭环")}
     <div class="settings-body">
-      ${s.error ? `<div class="appr-error">技能提案端点不可用：${escapeHtml(s.error)}</div>` : ""}
       <div class="settings-section">
-        <h3>筛选与刷新</h3>
+        <h3>技能提案 · ${proposals.length}</h3>
         <div class="set-card">
           <div class="set-row">
-            <div class="set-copy">
-              <div class="set-name">状态</div>
-              <div class="set-desc">共 ${Number(report.proposals || 0)} 条提案 · 已采纳 ${Number(report.adopted || 0)} 条 · 由真实回合自动沉淀，采纳后写入技能目录</div>
-            </div>
+            <div class="set-copy"><div class="set-name">状态筛选</div><div class="set-desc">由真实回合自动沉淀，采纳后写入技能目录</div></div>
             <div class="seg prop-filter" id="prop-filter">
               ${PROPOSAL_FILTERS.map((f) => `<button type="button" data-prop-status="${f.id}" class="${status === f.id ? "is-on" : ""}">${f.label}${counts[f.id] ? ` ${counts[f.id]}` : ""}</button>`).join("")}
             </div>
           </div>
-          <div class="set-row">
-            <div class="set-copy"><div class="set-name">刷新</div><div class="set-desc">${escapeHtml(updated)}；房间产生新提案时（SSE）本面板打开会自动刷新</div></div>
-            <button class="btn sm" id="prop-refresh">${ICONS.refresh} 刷新</button>
+          <div class="prop-list" id="prop-list">
+            ${proposals.length ? proposals.map(proposalCardHTML).join("") : `<div class="appr-empty">当前没有待处理的技能提案。</div>`}
           </div>
         </div>
       </div>
 
       <div class="settings-section">
-        <h3>提案 · ${proposals.length}</h3>
-        <div class="set-card prop-list" id="prop-list">
-          ${proposals.length ? proposals.map(proposalCardHTML).join("") : `<div class="appr-empty">${escapeHtml(emptyProposalText(status))}</div>`}
+        <h3>已安装技能 · ${skills.length}</h3>
+        <div class="set-card">
+          ${skills.map((s) => `<div class="skill-card">
+            <div class="skill-top"><span class="skill-name">${escapeHtml(s.name)}</span><span class="tag ${s.source === "workspace" ? "accent" : ""}">${s.source === "workspace" ? "工作区" : "内置"}</span></div>
+            <div class="skill-desc">${escapeHtml(s.description || "")}</div>
+            <div class="skill-when">${escapeHtml(s.when_to_use || "")}</div>
+          </div>`).join("") || `<div class="empty-mini">还没有技能。</div>`}
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Hooks 治理</h3>
+        <div class="set-card">
+          ${[...pre.map((h) => ({ ...h, kind: "PreToolUse" })), ...post.map((h) => ({ ...h, kind: "PostToolUse" }))].map((h) => `<div class="hook-row">
+            <span class="hook-kind">${h.kind}</span>
+            <div class="hook-body"><div class="hook-name">${escapeHtml(h.matcher || "*")} → ${escapeHtml(h.action || "")}</div><div class="hook-detail">${escapeHtml(h.reason || "无备注")}</div></div>
+          </div>`).join("") || `<div class="empty-mini">没有配置 Hook。</div>`}
+          <div class="set-row">
+            <div class="set-copy"><div class="set-name">配置来源</div><div class="set-desc">${escapeHtml(hooks.config_path || "")}</div></div>
+            <button class="btn sm" id="hooks-reload">${ICONS.refresh} 重新加载</button>
+          </div>
         </div>
       </div>
     </div>`;
-}
-
-function emptyProposalText(status) {
-  if (status === "proposed") return "当前没有待评审的提案。成员在真实回合里总结出可复用流程时，这里会自动出现。";
-  if (status === "approved") return "没有已通过但尚未落盘的提案。";
-  if (status === "rejected") return "没有已拒绝的提案。";
-  return "还没有任何技能提案。等一轮真实协作结束，学习闭环会把经验沉淀到这里。";
 }
 
 function proposalCardHTML(p) {
@@ -516,20 +436,10 @@ function proposalCardHTML(p) {
   const moreFiles = fileIds.length > 6 ? `<span class="prop-file-more">+${fileIds.length - 6}</span>` : "";
   const rounds = (p.evidence || []).filter((e) => e.round_id).length;
   const canAct = p.status !== "adopted";
-  const adoptedLine = p.status === "adopted" && p.skill
-    ? `<div class="prop-adopted">${ICONS.checkCircle}<span>已安装技能 <code>${escapeHtml(p.skill)}</code></span>${p.adoptedAt ? `<span class="prop-adopted-time">${escapeHtml(relTime(p.adoptedAt))}</span>` : ""}</div>`
-    : "";
-  const guardLine = p.guardVerdict && p.guardVerdict !== "allow" && p.status !== "adopted"
-    ? `<div class="prop-guard">${ICONS.info}<span>上次落盘被 guard 判定为「${escapeHtml(p.guardVerdict)}」${p.reason ? `：${escapeHtml(p.reason)}` : ""}</span></div>`
-    : "";
-  // 人工评审意见（reject/defer/approve 时写入）；guard 阻断也复用 reason，已在上面单独展示。
-  const reviewLine = p.reason && ["rejected", "deferred", "approved"].includes(p.status)
-    ? `<div class="prop-review"><span class="prop-review-label">评审意见</span>${escapeHtml(p.reason)}${p.reviewedBy ? `<span class="prop-review-by">· ${escapeHtml(p.reviewedBy)}</span>` : ""}</div>`
-    : "";
   return `<div class="prop-card" data-proposal-id="${escapeAttr(p.id)}">
     <div class="prop-head">
       <span class="prop-status is-${meta.cls}">${escapeHtml(meta.label)}</span>
-      <span class="prop-title" title="${escapeAttr(p.title || "")}">${escapeHtml(p.title || "（无标题）")}</span>
+      <span class="prop-title">${escapeHtml(p.title || "（无标题）")}</span>
       <span class="spacer"></span>
       <span class="prop-time">${escapeHtml(relTime(p.createdAt) || formatTime(p.createdAt))}</span>
     </div>
@@ -540,11 +450,7 @@ function proposalCardHTML(p) {
       ${tags ? `<span class="prop-tags">${tags}</span>` : ""}
     </div>
     <div class="prop-body" data-prop-body>${escapeHtml(p.body || "")}</div>
-    <button class="prop-more" type="button" data-prop-act="toggle">${ICONS.chevron} 展开全文</button>
     ${fileChips ? `<div class="prop-evidence"><span class="prop-ev-label">证据</span>${fileChips}${moreFiles}</div>` : ""}
-    ${reviewLine}
-    ${adoptedLine}
-    ${guardLine}
     ${canAct ? `<div class="prop-actions">
       <input class="input prop-reason" data-prop-reason placeholder="拒绝/延后原因（可选）" maxlength="120">
       <button class="btn sm primary" data-prop-act="adopt">采纳</button>
@@ -552,6 +458,30 @@ function proposalCardHTML(p) {
       <button class="btn sm ghost" data-prop-act="defer">延后</button>
     </div>` : ""}
   </div>`;
+}
+
+function memoryTab() {
+  return `
+    ${header("记忆", "持久事实、用户画像与 FTS5 外部索引（Hermes E28）")}
+    <div class="settings-body">
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-label">持久记忆库</div><div class="stat-value">mem_entries</div><div class="stat-sub">SQLite + FTS5 全文索引</div></div>
+        <div class="stat-card"><div class="stat-label">目标维度</div><div class="stat-value">2<small>类</small></div><div class="stat-sub">memory（世界事实）+ user（用户偏好）</div></div>
+        <div class="stat-card"><div class="stat-label">检索机制</div><div class="stat-value">混合<small>检索</small></div><div class="stat-sub">FTS5 unicode61 + 二元组 Dice 打分</div></div>
+        <div class="stat-card"><div class="stat-label">单轮预算</div><div class="stat-value">2000<small>字</small></div><div class="stat-sub">半衰期 30 天自然遗忘</div></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>记忆检索测试</h3>
+        <div class="set-card">
+          <div class="set-row">
+            <div class="set-copy"><div class="set-name">查询关键字</div><div class="set-desc">测试 FTS5 与 CJK 二元组混合排序命中率</div></div>
+            <input class="input" style="width:260px" placeholder="输入关键字检索跨会话记忆…">
+          </div>
+          <div class="empty-mini" style="padding:14px 18px">当前记忆库运行正常；各成员在对话中可通过 memory 工具持久化事实并自动在提示词注入。</div>
+        </div>
+      </div>
+    </div>`;
 }
 
 function usageTab() {
@@ -567,18 +497,57 @@ function usageTab() {
   const msgCount = (state.rooms || []).reduce((sum, room) => sum + (room.message_count || 0), 0);
   const botRows = (ctx.bots || []).slice().sort((a, b) => (b.tokens || 0) - (a.tokens || 0));
   const maxBotTokens = Math.max(1, ...botRows.map((b) => b.tokens || 0));
+
+  const avgTps = stats.avg_tps || ctx.avg_tps || 0;
+  const avgTtft = stats.avg_ttft_ms || ctx.avg_ttft_ms || 0;
+
   return `
-    ${header("用量", "Token、缓存与成员消耗")}
+    ${header("用量与遥测", "Token 消耗、缓存吞吐率与物理测速")}
     <div class="settings-body">
       <div class="stat-grid">
         <div class="stat-card"><div class="stat-label">本次运行输入</div><div class="stat-value">${formatTokens(totalPrompt)}<small>tok</small></div><div class="stat-sub">含缓存读取</div></div>
         <div class="stat-card"><div class="stat-label">本次运行输出</div><div class="stat-value">${formatTokens(totalCompletion)}<small>tok</small></div><div class="stat-sub">全部成员</div></div>
-        <div class="stat-card"><div class="stat-label">缓存命中</div><div class="stat-value">${cacheRate}<small>%</small></div><div class="stat-sub">${formatTokens(tokens.cache_read)} tok</div></div>
+        <div class="stat-card"><div class="stat-label">平均生成速率</div><div class="stat-value">${avgTps}<small>tok/s</small></div><div class="stat-sub">物理生成吞吐</div></div>
+        <div class="stat-card"><div class="stat-label">首字延迟 (TTFT)</div><div class="stat-value">${avgTtft}<small>ms</small></div><div class="stat-sub">网络与前缀检索</div></div>
+        <div class="stat-card"><div class="stat-label">缓存命中率</div><div class="stat-value">${cacheRate}<small>%</small></div><div class="stat-sub">${formatTokens(tokens.cache_read)} tok 命中</div></div>
         <div class="stat-card"><div class="stat-label">群聊与消息</div><div class="stat-value">${counts.rooms || (state.rooms || []).length}<small>群</small></div><div class="stat-sub">${msgCount} 条群消息</div></div>
       </div>
 
       <div class="settings-section">
-        <h3>当前上下文构成</h3>
+        <h3>成员测速榜单</h3>
+        <div class="set-card" style="padding:0;overflow:hidden">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="text-align:left;color:var(--text-3);border-bottom:1px solid var(--border, var(--line));background:rgba(255,255,255,0.02)">
+                <th style="padding:8px 12px">成员</th>
+                <th style="padding:8px 12px">调用次数</th>
+                <th style="padding:8px 12px">Token 总量</th>
+                <th style="padding:8px 12px">平均 TTFT</th>
+                <th style="padding:8px 12px">生成速率</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${botRows.map((b) => {
+                const p = profileFor(b.bot_id, state.botsById[b.bot_id]);
+                const bCalls = b.messages_count ?? b.calls ?? 0;
+                const bTokens = b.tokens ?? 0;
+                const bTtft = b.avg_ttft_ms ? `${b.avg_ttft_ms}ms` : "-";
+                const bTps = b.avg_tps ? `${b.avg_tps} tok/s` : "-";
+                return `<tr style="border-bottom:1px solid var(--border-light, rgba(255,255,255,0.04))">
+                  <td style="padding:8px 12px;display:flex;align-items:center;gap:8px">${avatar(b.bot_id, 20)}<span style="font-weight:500">${escapeHtml(p.name)}</span></td>
+                  <td style="padding:8px 12px">${bCalls} 次</td>
+                  <td style="padding:8px 12px">${formatTokens(bTokens)} tok</td>
+                  <td style="padding:8px 12px">${bTtft}</td>
+                  <td style="padding:8px 12px;color:var(--amber, #f59e0b)">${bTps}</td>
+                </tr>`;
+              }).join("") || `<tr><td colspan="5" style="padding:14px;text-align:center;color:var(--text-3)">暂无测速记录</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>上下文构成</h3>
         <div class="set-card"><div class="bar-list">
           ${[["系统", dist.system, "var(--text-3)"], ["用户", dist.user, "var(--accent)"], ["助手", dist.assistant, "var(--green)"], ["工具", dist.tool, "var(--amber)"]].map(([name, val, color]) => `<div class="bar-row">
             <span class="bar-name">${name}</span>
@@ -601,6 +570,51 @@ function usageTab() {
             </div>`;
           }).join("") || `<div class="empty-mini">还没有成员上下文记录</div>`}
         </div></div>
+      </div>
+    </div>`;
+}
+
+function botsTab(selectedBot, ctx) {
+  const bots = state.bots || [];
+  const bot = bots.find((b) => b.id === selectedBot) || bots[0] || { id: "ChiefRouter" };
+  const p = profileFor(bot.id, bot);
+  const models = state.models || [];
+  const modelOpts = models.map((m) => `<option value="${escapeAttr(m.id)}" ${m.id === bot.model ? "selected" : ""}>${escapeHtml(m.display_name || m.id)}</option>`).join("");
+  return `
+    ${header("机器人", "身份、模型与工具权限")}
+    <div class="settings-body">
+      <div class="bot-layout">
+        <div class="bot-side">
+          ${bots.map((b) => {
+            const bp = profileFor(b.id, b);
+            return `<button class="bot-side-row${b.id === bot.id ? " is-on" : ""}" data-bot-id="${escapeAttr(b.id)}">
+              ${avatar(b.id, 28)}
+              <span class="bot-side-copy"><span class="bot-name">${escapeHtml(bp.name)}</span><span class="bot-sub">${escapeHtml(bp.role)}</span></span>
+            </button>`;
+          }).join("")}
+        </div>
+        <div class="bot-edit">
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+            ${avatar(bot.id, 56)}
+            <div style="min-width:0;flex:1">
+              <div style="font-size:16px;font-weight:600">${escapeHtml(p.name)}</div>
+              <div class="set-desc">${escapeHtml(p.tagline && p.tagline.startsWith(p.role) ? p.tagline : `${p.role} · ${p.tagline}`)}</div>
+              <div style="display:flex;gap:6px;margin-top:8px">
+                <button class="btn sm" id="b-avatar">更换头像</button>
+                <button class="btn sm ghost" id="b-avatar-reset">恢复默认</button>
+              </div>
+            </div>
+          </div>
+          <div class="field"><label>显示名称</label><input class="input" id="b-name" value="${escapeAttr(p.name)}"></div>
+          <div class="field"><label>身份签名</label><input class="input" id="b-tagline" value="${escapeAttr(p.tagline)}" placeholder="用一句话说明它负责什么"></div>
+          <div class="field"><label>模型</label><select class="select" id="b-model">${modelOpts || `<option>${escapeHtml(bot.model || "")}</option>`}</select></div>
+          <div class="field"><label>思考强度</label><select class="select" id="b-thinking">${["off", "low", "medium", "high"].map((lv) => `<option value="${lv}"${(bot.thinking_level || "off") === lv ? " selected" : ""}>${({ off: "关闭（最快）", low: "低", medium: "中", high: "高（最稳）" })[lv]}</option>`).join("")}</select></div>
+          <div class="field"><label>系统提示词</label><textarea class="textarea" id="b-prompt" rows="5">${escapeHtml(bot.system_prompt || "")}</textarea></div>
+          <div class="field"><label>已挂载工具</label><div style="display:flex;flex-wrap:wrap;gap:5px">${(bot.allowed_tools || []).map((t) => `<span class="tag" style="height:22px;font-family:var(--mono);font-size:10.5px">${escapeHtml(t)}</span>`).join("") || `<span class="set-desc">无</span>`}</div></div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+            <button class="btn primary sm" id="b-save">保存机器人设置</button>
+          </div>
+        </div>
       </div>
     </div>`;
 }
@@ -628,7 +642,6 @@ function aboutTab() {
         <div class="set-row"><div class="set-copy"><div class="set-name">运行方式</div><div class="set-desc">Electron 桌面壳 + 本地 Node 服务；前端纯静态（ES module、无构建、无外网资源）</div></div></div>
         <div class="set-row"><div class="set-copy"><div class="set-name">数据目录</div><div class="set-desc">${escapeHtml(dataRoot || "D:\\AgentFusion")}</div></div></div>
         <div class="set-row"><div class="set-copy"><div class="set-name">模型网关</div><div class="set-desc">${escapeHtml(gateway || "http://127.0.0.1:3425/v1")}</div></div></div>
-        <div class="set-row"><div class="set-copy"><div class="set-name">群聊构想</div><div class="set-desc">群主赋权与分派 · 上下文共享策略 · 群文件空间按 file_id 同步 · 小群结论回报</div></div></div>
         <div class="set-row"><div class="set-copy"><div class="set-name">致谢</div><div class="set-desc">群聊协作模型参考 DS-Bot 的公开设计；头像与界面素材为本项目原创</div></div></div>
       </div>
     </div>`;
@@ -706,12 +719,6 @@ function bindContent(root, ctx) {
       } catch (err) { toast(`保存失败：${err.message}`, "error"); }
     });
   }
-  if (ctx.tab === "capabilities") {
-    $("#hooks-reload", root)?.addEventListener("click", async () => {
-      try { await reloadHooks(); toast("Hooks 已重新加载", "success"); ctx.rerender(); }
-      catch (err) { toast(`重载失败：${err.message}`, "error"); }
-    });
-  }
   if (ctx.tab === "approvals") {
     const doRefresh = async (message, kind = "success") => {
       await refreshApprovals();
@@ -739,9 +746,6 @@ function bindContent(root, ctx) {
       await doRefresh("审批列表已刷新");
     });
 
-    /* 事件委托：每行先选 scope（once/session/always），再点批准/拒绝。
-     * 行的当前 scope 存在 data-approval-scope，避免和按钮的 data-scope 混淆
-     * （否则 closest("[data-scope]") 会先命中整行，把批准点击吞掉）。 */
     $("#appr-pending", root)?.addEventListener("click", async (ev) => {
       const scopeBtn = ev.target.closest("button[data-scope]");
       if (scopeBtn) {
@@ -767,7 +771,6 @@ function bindContent(root, ctx) {
       } catch (err) {
         const message = String(err?.message || err);
         if (message.includes("already_resolved")) {
-          // 另一端已经裁决 / 已过期：不是错误，刷新后提示即可。
           await doRefresh("这条审批已经被处理过了", "info");
         } else {
           $$("[data-act]", row).forEach((b) => { b.disabled = false; });
@@ -776,7 +779,12 @@ function bindContent(root, ctx) {
       }
     });
   }
-  if (ctx.tab === "proposals") {
+  if (ctx.tab === "skills") {
+    $("#hooks-reload", root)?.addEventListener("click", async () => {
+      try { await reloadHooks(); toast("Hooks 已重新加载", "success"); ctx.rerender(); }
+      catch (err) { toast(`重载失败：${err.message}`, "error"); }
+    });
+
     const doRefresh = async (message, kind = "success") => {
       await refreshSkillProposals();
       if (message) toast(message, kind);
@@ -793,20 +801,7 @@ function bindContent(root, ctx) {
       ctx.rerender();
     });
 
-    $("#prop-refresh", root)?.addEventListener("click", async (ev) => {
-      ev.currentTarget.disabled = true;
-      await doRefresh("技能提案已刷新");
-    });
-
-    /* 事件委托：展开正文 / 采纳（两段式）/ 拒绝 / 延后。 */
     $("#prop-list", root)?.addEventListener("click", async (ev) => {
-      const toggle = ev.target.closest('[data-prop-act="toggle"]');
-      if (toggle) {
-        const card = toggle.closest("[data-proposal-id]");
-        const expanded = card.classList.toggle("is-expanded");
-        toggle.innerHTML = `${ICONS.chevron} ${expanded ? "收起" : "展开全文"}`;
-        return;
-      }
       const actionBtn = ev.target.closest("[data-prop-act]");
       if (!actionBtn) return;
       const card = actionBtn.closest("[data-proposal-id]");
@@ -826,7 +821,7 @@ function bindContent(root, ctx) {
           const stage = result.stage === "review" ? "批准" : "落盘";
           toast(`${stage}失败：${result.error}`, "error");
         }
-        await doRefresh(); // 无论成败都以后端状态为准（guard 阻断会把原因写回提案）
+        await doRefresh();
         return;
       }
 

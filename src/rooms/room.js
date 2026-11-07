@@ -13,7 +13,7 @@
  *   d. members can pull a sub-group for a specific question               → createSubgroup + subgroup_report
  */
 import path from "node:path";
-import { DIRS } from "../config.js";
+import { DIRS, DEFAULT_TURN_TIMEOUT_MS } from "../config.js";
 import { createLogger } from "../log.js";
 import { FileSpace } from "./files.js";
 import { createRoomTools } from "./tools.js";
@@ -25,6 +25,60 @@ import { evaluateLearningGate, buildSkillDraft } from "../skills/learn.js";
 import { judgeReviewer } from "../skills/judge.js";
 import { defaultPermissions } from "../store.js";
 import { BotRunner } from "../engine/bot.js";
+
+export { DEFAULT_TURN_TIMEOUT_MS };
+
+/**
+ * 5-tier precedence hierarchy for turn timeout:
+ * 1. Explicit turnOptions: turnTimeoutMs or timeoutMs
+ * 2. Member permissions: turn_timeout_seconds * 1000 or turn_timeout_ms
+ * 3. Room settings: watchdog_timeout_ms or watchdog_timeout * 1000 or turn_timeout_seconds * 1000
+ * 4. Environment: FUSION_WATCHDOG_TIMEOUT_MS or FUSION_WATCHDOG_TIMEOUT * 1000
+ * 5. Default fallback: DEFAULT_TURN_TIMEOUT_MS (30,000ms)
+ */
+export function resolveTurnTimeoutMs(room, botId = null, turnOptions = {}) {
+  if (Number.isFinite(turnOptions?.turnTimeoutMs) && turnOptions.turnTimeoutMs > 0) {
+    return Number(turnOptions.turnTimeoutMs);
+  }
+  if (Number.isFinite(turnOptions?.timeoutMs) && turnOptions.timeoutMs > 0) {
+    return Number(turnOptions.timeoutMs);
+  }
+  const perms = (botId && typeof room?.permissionsOf === "function"
+    ? room.permissionsOf(botId)
+    : (room?.member_permissions?.[botId] || room?._memberPermissions?.get?.(botId))) || null;
+  if (Number.isFinite(perms?.turn_timeout_ms) && perms.turn_timeout_ms > 0) {
+    return Number(perms.turn_timeout_ms);
+  }
+  if (Number.isFinite(perms?.turn_timeout_seconds) && perms.turn_timeout_seconds > 0) {
+    return perms.turn_timeout_seconds * 1000;
+  }
+  const s = room?.settings || {};
+  if (Number.isFinite(s.turn_timeout_ms) && s.turn_timeout_ms > 0) {
+    return Number(s.turn_timeout_ms);
+  }
+  if (Number.isFinite(s.watchdog_timeout_ms) && s.watchdog_timeout_ms > 0) {
+    return Number(s.watchdog_timeout_ms);
+  }
+  if (Number.isFinite(s.watchdog_timeout) && s.watchdog_timeout > 0) {
+    return Number(s.watchdog_timeout) * 1000;
+  }
+  if (Number.isFinite(s.turn_timeout_seconds) && s.turn_timeout_seconds > 0) {
+    return Number(s.turn_timeout_seconds) * 1000;
+  }
+  if (process.env.AGENT_TURN_TIMEOUT_MS) {
+    const envMs = Number(process.env.AGENT_TURN_TIMEOUT_MS);
+    if (Number.isFinite(envMs) && envMs > 0) return envMs;
+  }
+  if (process.env.FUSION_WATCHDOG_TIMEOUT_MS) {
+    const envMs = Number(process.env.FUSION_WATCHDOG_TIMEOUT_MS);
+    if (Number.isFinite(envMs) && envMs > 0) return envMs;
+  }
+  if (process.env.FUSION_WATCHDOG_TIMEOUT) {
+    const envSec = Number(process.env.FUSION_WATCHDOG_TIMEOUT);
+    if (Number.isFinite(envSec) && envSec > 0) return envSec * 1000;
+  }
+  return DEFAULT_TURN_TIMEOUT_MS;
+}
 
 const log = createLogger("room");
 
@@ -51,6 +105,132 @@ function verdictSummary(judgement) {
 function truncate(text, max) {
   const s = String(text ?? "");
   return s.length > max ? s.slice(0, max) : s;
+}
+
+/**
+ * Evaluates whether an assistant turn made substantive forward progress.
+ * @param {object} result
+ * @param {object} [ctx]
+ * @returns {{isProgress:boolean, grant:number, resetStagnant:boolean, tier:number, tierName:string, reason:string}}
+ */
+export function evalForwardProgress(result, ctx = {}) {
+  if (result?.error && !result?.text) {
+    return { isProgress: false, grant: 0, resetStagnant: false, tier: 0, tierName: "error", reason: "turn_error" };
+  }
+
+  const toolResults = Array.isArray(result?.toolResults) ? result.toolResults : [];
+  const toolsUsed = Array.isArray(result?.toolsUsed) ? result.toolsUsed : [];
+  const failedResults = toolResults.filter((t) => t && (t.ok === false || t.ok === 0 || t.error));
+  const successfulTools = toolResults.filter((t) => t && (t.ok === true || t.ok === 1));
+
+  // If there are only failed tool results, treat as failure (Tier 0)
+  if (toolResults.length > 0 && failedResults.length === toolResults.length) {
+    return { isProgress: false, grant: 0, resetStagnant: false, tier: 0, tierName: "tool_failure", reason: "all_tools_failed" };
+  }
+
+  // Tier 1: Mutating / execution tools
+  const mutatingTools = [
+    "write", "write_file", "edit", "edit_file", "bash", "powershell",
+    "room_file_save", "room_file_move", "room_assign_task", "room_create_subgroup"
+  ];
+  const hasMutating = successfulTools.some((t) => mutatingTools.includes(t.name)) ||
+    toolsUsed.some((name) => mutatingTools.includes(name) && !result?.error);
+  if (hasMutating) {
+    return { isProgress: true, grant: 2, resetStagnant: true, tier: 1, tierName: "mutating_tool", reason: "executed_mutating_tool" };
+  }
+
+  // Tier 2: Observational / information retrieval tools
+  const observationalTools = [
+    "read", "read_file", "grep", "grep_search", "find", "find_by_name", "ls", "list_dir",
+    "room_file_read", "room_file_list", "room_evidence_status", "skill_invoke", "memory"
+  ];
+  const hasObservational = successfulTools.some((t) => observationalTools.includes(t.name)) ||
+    toolsUsed.some((name) => observationalTools.includes(name) && !result?.error);
+  if (hasObservational) {
+    return { isProgress: true, grant: 1, resetStagnant: true, tier: 2, tierName: "observational_tool", reason: "executed_observational_tool" };
+  }
+
+  // Tier 3: Substantive structured output without tools
+  const text = String(result?.text || "").trim();
+  const hasStructure = text.length >= 150 && (
+    text.includes("```") ||
+    text.includes("###") ||
+    text.includes("【") ||
+    (text.match(/^[-*]\s+/m) !== null) ||
+    (text.match(/^\d+\.\s+/m) !== null)
+  );
+  if (hasStructure) {
+    return { isProgress: true, grant: 1, resetStagnant: true, tier: 3, tierName: "structured_output", reason: "substantive_structured_text" };
+  }
+
+  // Tier 0: Chatter / trivial text
+  return { isProgress: false, grant: 0, resetStagnant: false, tier: 0, tierName: "chatter", reason: "no_progress_chatter" };
+}
+
+/**
+ * Detects semantic oscillation, ping-pong chatter, or tool call duplication loops.
+ * @param {object} turn
+ * @param {object} [ctx]
+ * @returns {{isLoop:boolean, detected:boolean, type?:string, reason?:string}}
+ */
+export function detectInfiniteLoop(turn, ctx = {}) {
+  const text = String(turn?.text || "").trim();
+  const botId = String(turn?.botId || turn?.bot_id || turn?.member || turn?.bot || "");
+  const normalizedText = text.toLowerCase().replace(/[\s\p{P}]+/gu, "");
+  const textLen = text.length;
+  const toolHistory = ctx._round_tool_history || ctx.round_tool_history || [];
+  const fingerprints = ctx._round_turn_fingerprints || ctx.round_turn_fingerprints || [];
+
+  // 1. Tool Call Duplication Check
+  const toolResults = Array.isArray(turn?.toolResults) ? [...turn.toolResults] : [];
+  if (turn?.tool && turn?.ok === false) {
+    toolResults.push({ name: turn.tool, ok: false, args: turn.args });
+  }
+  for (const tr of toolResults) {
+    if (!tr.ok && tr.name) {
+      const matchingRecent = toolHistory.filter(
+        (h) => (h.botId === botId || h.bot === botId) &&
+               (h.tool === tr.name || h.name === tr.name) &&
+               !h.ok &&
+               (!turn.args || !h.args || h.args === turn.args)
+      );
+      if (matchingRecent.length >= 2) {
+        return { isLoop: true, detected: true, type: "tool_failure_loop", reason: `工具 ${tr.name} 连续多次失败` };
+      }
+    }
+  }
+
+  // 2. Repetitive Content / Semantic Oscillation Check
+  if (normalizedText.length > 10) {
+    const identicalCount = fingerprints.filter(
+      (fp) => (fp.botId === botId || fp.bot === botId) &&
+             (fp.hash === normalizedText || fp.fp === normalizedText)
+    ).length;
+    if (identicalCount >= 2) {
+      return { isLoop: true, detected: true, type: "semantic_oscillation", reason: `成员 ${botId} 重复输出相同内容` };
+    }
+  }
+
+  // 3. Ping-Pong Chatter Check (3 consecutive short non-tool turns alternating between bots)
+  if (fingerprints.length >= 2) {
+    const last1 = fingerprints[fingerprints.length - 1];
+    const last2 = fingerprints[fingerprints.length - 2];
+    const last1Bot = last1.botId || last1.bot;
+    const last2Bot = last2.botId || last2.bot;
+    const last1Len = last1.textLen ?? (last1.fp ? last1.fp.length : 0);
+    const hasTools = turn.hasTools || (Array.isArray(turn.toolResults) && turn.toolResults.length > 0);
+    if (
+      last2Bot === botId &&
+      last1Bot !== botId &&
+      textLen < 120 &&
+      last1Len < 120 &&
+      !hasTools
+    ) {
+      return { isLoop: true, detected: true, type: "ping_pong_chatter", reason: `成员 ${botId} 与 ${last1Bot} 陷入无进展闲聊` };
+    }
+  }
+
+  return { isLoop: false, detected: false };
 }
 
 export class Room {
@@ -104,8 +284,15 @@ export class Room {
     this.task_plan = [];
     /** @type {string[]} 已回收的小群 id（最近 50 个，持久化到 kv，便于追溯） */
     this.subgroup_history = this._loadSubgroupHistory();
+    this._activeTurnController = null;
+    this.base_relay_limit = Math.max(6, RELAY_LIMIT_FACTOR * Math.max(1, this.members.length));
+    this.max_relay_ceiling = Number(this.settings?.max_relay_ceiling) || 25;
+    this.max_chatter_relays = Number(this.settings?.max_chatter_relays) || 4;
     this.relays = 0;
-    this.relay_limit = RELAY_LIMIT_FACTOR * Math.max(1, this.members.length);
+    this.relay_limit = Number(this.settings?.base_relay_limit) || this.base_relay_limit;
+    this.consecutive_stagnant_turns = 0;
+    this._round_tool_history = [];
+    this._round_turn_fingerprints = [];
     this.round_running = 0;
     this.pending_rounds = 0;
     this.last_round_id = null;
@@ -215,7 +402,10 @@ export class Room {
       this.member_permissions[this.owner_id].can_create_subgroup = true;
     }
     this.speaking_slots = [...this.members];
-    this.relay_limit = RELAY_LIMIT_FACTOR * Math.max(1, this.members.length);
+    this.base_relay_limit = Math.max(6, RELAY_LIMIT_FACTOR * Math.max(1, this.members.length));
+    this.max_relay_ceiling = Number(this.settings?.max_relay_ceiling) || 25;
+    this.max_chatter_relays = Number(this.settings?.max_chatter_relays) || 4;
+    this.relay_limit = Number(this.settings?.base_relay_limit) || this.base_relay_limit;
     return this;
   }
 
@@ -641,7 +831,7 @@ export class Room {
       sections.push(`=== 系统通知 ===\n${this.system_notices.map((n) => `- ${n}`).join("\n")}`);
     }
     const assignments = this.pending_assignments[botId] || [];
-    const deliveredAssignments = task ? [task] : assignments.splice(0, assignments.length);
+    const deliveredAssignments = task ? [task] : (assignments.length > 0 ? [assignments.shift()] : []);
     if (deliveredAssignments.length) {
       sections.push(`=== 群主分派给你的任务 ===\n${deliveredAssignments.map((a) => `- ${a}`).join("\n")}`);
     }
@@ -685,6 +875,10 @@ export class Room {
       log.warn("persist user message failed", err?.message || err);
     }
     this.relays = 0;
+    this.relay_limit = Number(this.settings?.base_relay_limit) || this.base_relay_limit;
+    this.consecutive_stagnant_turns = 0;
+    this._round_tool_history = [];
+    this._round_turn_fingerprints = [];
     this.status = "active";
     this.updated_at = record.timestamp;
     this.mentionMembers(text, speaker);
@@ -693,6 +887,24 @@ export class Room {
     this.pending_rounds += 1;
     this.enqueueRound(text);
     return { status: "accepted", room_id: this.room_id };
+  }
+
+  /**
+   * Cancel or abort the currently active assistant turn in this room.
+   * @param {string} [reason]
+   * @returns {boolean}
+   */
+  abortRound(reason = "Round aborted") {
+    if (this._activeTurnController) {
+      this._activeTurnController.abort(new Error(reason));
+      this._activeTurnController = null;
+      return true;
+    }
+    return false;
+  }
+
+  cancelActiveTurn(reason = "Turn cancelled") {
+    return this.abortRound(reason);
   }
 
   enqueueRound(instruction) {
@@ -717,14 +929,45 @@ export class Room {
     return [...found];
   }
 
+  evalForwardProgress(result, ctx = {}) {
+    return evalForwardProgress(result, { ...ctx, room: this });
+  }
+
+  detectInfiniteLoop(turn) {
+    return detectInfiniteLoop(turn, this);
+  }
+
+  async extendRelayLimit(grant, reason) {
+    if (grant <= 0) return 0;
+    const oldLimit = this.relay_limit;
+    const ceiling = this.max_relay_ceiling || 25;
+    const newLimit = Math.min(ceiling, oldLimit + grant);
+    const actualGrant = newLimit - oldLimit;
+    if (actualGrant > 0) {
+      this.relay_limit = newLimit;
+      await this.emit("relay_extended", {
+        relays: this.relays,
+        old_limit: oldLimit,
+        new_limit: newLimit,
+        ceiling,
+        grant: actualGrant,
+        reason,
+      });
+    }
+    return actualGrant;
+  }
+
   /* ----------------------------------------------------------------- round */
 
-  async runRound({ instruction } = {}) {
+  async runRound({ instruction, turnTimeoutMs } = {}) {
     const roundId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     this.last_round_id = roundId;
     this.round_running += 1;
     this.pending_rounds = Math.max(0, this.pending_rounds - 1);
     this.system_notices = [];
+    this._round_tool_history = [];
+    this._round_turn_fingerprints = [];
+    this.consecutive_stagnant_turns = 0;
     // Load undrained notices for this round (file moves, sub-group reports, ...).
     try {
       const notices = this.store?.drainNotices?.(this.room_id) || [];
@@ -747,17 +990,19 @@ export class Room {
 
     const spoken = [];
     const seen = new Set();
+    const executedUnits = new Set();
     const assignmentOrder = [];
-    // 每轮重新声明任务单元（群主在本轮 assign / depends_on 里定义）。
-    this.task_plan = [];
-    // 执行短路状态机（src/rooms/executor.js）：失败会沿依赖边跳过下游。
-    this._executionPlan = null;
+    // 每轮重新声明任务单元（群主在本轮 assign / depends_on 里定义；若已预分派则保留）。
+    if (!Array.isArray(this.task_plan) || !this.task_plan.length) {
+      this.task_plan = [];
+      this._executionPlan = null;
+    }
     // 本轮回合（供学习闭环判断质量）与证据状态。
     this._round_turns = [];
     let assignedMode = false;
     let paused = false;
     let guard = 0;
-    const maxTurns = Math.max(1, this.speaking_slots.length * MAX_TURNS_FACTOR);
+    const maxTurns = Math.max(this.max_relay_ceiling * 2, this.speaking_slots.length * MAX_TURNS_FACTOR);
 
     // Owner first when the message carries no explicit @mention.
     if (this.owner_id && this.speaking_slots.includes(this.owner_id) && !mentionList.length) {
@@ -784,12 +1029,20 @@ export class Room {
         // 执行短路：声明了任务单元时，只跑「依赖已全部成功」的单元对应成员；被上游失败跳过的成员不跑。
         this._refreshExecutionPlan();
         let nextId = null;
-        if (this.task_plan.length && this._executionPlan) nextId = this._readyBot(seen);
+        let activeUnitId = null;
+        if (this.task_plan.length && this._executionPlan) {
+          const ready = this._readyBotUnit(executedUnits);
+          if (ready) {
+            nextId = ready.botId;
+            activeUnitId = ready.unitId;
+          }
+        }
         if (!nextId) {
           nextId = assignedMode ? pendingNext : this.speaking_slots.find((b) => !seen.has(b));
         }
         if (!nextId) break;
         seen.add(nextId);
+        if (activeUnitId) executedUnits.add(activeUnitId);
 
         if (!this.members.includes(nextId)) continue;
         if (this.permissionsOf(nextId).can_speak === false) continue;
@@ -811,27 +1064,157 @@ export class Room {
         }
         await this.emit("member_started", { member: nextId, round_id: roundId });
 
+        // --- Watchdog Timeout & AbortSignal (Feature 17) ---
+        const timeoutMs = resolveTurnTimeoutMs(this, nextId, { turnTimeoutMs });
+        const controller = new AbortController();
+        this._activeTurnController = controller;
+        let timedOut = false;
+        let timer = null;
+
+        if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+          timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort(new Error(`Watchdog timeout after ${timeoutMs}ms`));
+          }, timeoutMs);
+          if (typeof timer.unref === "function") timer.unref();
+        }
+
+        const turnStartMs = Date.now();
+        const graceMs = Math.min(2000, Math.max(200, Math.floor(timeoutMs * 0.2)));
+        let hardTimer = null;
+        const hardCutoffPromise = new Promise((resolve) => {
+          hardTimer = setTimeout(() => {
+            timedOut = true;
+            controller.abort(new Error(`Watchdog timeout after ${timeoutMs}ms (forced cutoff)`));
+            resolve({
+              __hardCutoff: true,
+              text: "",
+              error: `Watchdog timeout after ${timeoutMs}ms`,
+              ms: Date.now() - turnStartMs,
+              usage: null,
+              aborted: true,
+              timedOut: true,
+            });
+          }, timeoutMs + graceMs);
+          if (typeof hardTimer.unref === "function") hardTimer.unref();
+        });
+
         let result = { text: "", error: null, ms: 0, usage: null };
         try {
-          result = await runner.run({ prompt: memberInstruction, onToolEvent: () => {} });
+          result = await Promise.race([
+            runner.run({
+              prompt: memberInstruction,
+              signal: controller.signal,
+              onToolEvent: () => {},
+            }),
+            hardCutoffPromise,
+          ]);
         } catch (err) {
-          result = { text: "", error: err?.message || String(err), ms: 0, usage: null };
+          result = {
+            text: "",
+            error: err?.message || String(err),
+            ms: Date.now() - turnStartMs,
+            usage: null,
+            aborted: controller.signal.aborted,
+            timedOut,
+          };
+        } finally {
+          if (timer) clearTimeout(timer);
+          if (hardTimer) clearTimeout(hardTimer);
+          if (this._activeTurnController === controller) {
+            this._activeTurnController = null;
+          }
         }
-        await this.emit("member_finished", { member: nextId, round_id: roundId, ms: result?.ms || 0 });
+
+        const turnDurationMs = result?.ms || (Date.now() - turnStartMs);
+        const isTimeout = Boolean(
+          timedOut ||
+          result?.timedOut ||
+          (result?.error && String(result.error).toLowerCase().includes("timed out"))
+        );
+        const isAborted = Boolean(controller.signal.aborted || result?.aborted || isTimeout);
+        const hasError = Boolean(result?.error || isAborted);
+
+        if (hasError) {
+          const errorMsg = result?.error || (isTimeout ? `Watchdog timeout after ${timeoutMs}ms` : "turn aborted");
+          if (isTimeout) {
+            await this.emit("turn_timeout", {
+              bot_id: nextId,
+              member: nextId,
+              round_id: roundId,
+              timeout_ms: timeoutMs,
+              ms: turnDurationMs,
+              error: errorMsg,
+            });
+          }
+          await this.emit("member_error", {
+            bot_id: nextId,
+            member: nextId,
+            round_id: roundId,
+            error: errorMsg,
+            timed_out: isTimeout,
+            ms: turnDurationMs,
+          });
+          if (isTimeout) {
+            this.system_notices.push(`成员 ${nextId} 本轮执行超时（>${timeoutMs}ms），已中止。`);
+            log.warn("member turn timeout", nextId, `${timeoutMs}ms`);
+          } else {
+            this.system_notices.push(`成员 ${nextId} 本轮执行失败：${truncate(errorMsg, 300)}`);
+            log.warn("member failed", nextId, errorMsg);
+          }
+        }
+
+        await this.emit("member_finished", { member: nextId, round_id: roundId, ms: turnDurationMs });
 
         const text = String(result?.text || "").trim();
-        if (result?.error) {
-          this.system_notices.push(`成员 ${nextId} 本轮执行失败：${truncate(result.error, 300)}`);
-          log.warn("member failed", nextId, result.error);
-        }
-        // 先把这一步的成败写进执行计划：失败会立刻把下游标成 skipped（兄弟分支不受影响）。
         this._markTaskResult(seen, nextId, {
-          ok: Boolean(text) && !result?.error,
-          reason: result?.error || (text ? null : "没有产出文本"),
-        });
-        if (!text) {
-          if (!result?.error) this.system_notices.push(`成员 ${nextId} 本轮没有产出文本。`);
+          ok: Boolean(text) && !hasError,
+          reason: hasError ? (result?.error || (isTimeout ? `超时（${timeoutMs}ms）` : "执行中止")) : (text ? null : "没有产出文本"),
+        }, activeUnitId);
+
+        if (!text || hasError) {
+          if (!hasError && !result?.error) this.system_notices.push(`成员 ${nextId} 本轮没有产出文本。`);
           continue;
+        }
+
+        // --- Loop & Chatter Detection (Feature 18) ---
+        const loopCheck = this.detectInfiniteLoop({ botId: nextId, text, toolResults: result?.toolResults });
+        if (loopCheck.isLoop) {
+          log.warn(`infinite loop detected in room ${this.room_id}: ${loopCheck.reason}`);
+          this.system_notices.push(`检测到循环停滞：${loopCheck.reason}，本轮提前结束。`);
+          await this.emit("loop_detected", { ...loopCheck, member: nextId, round_id: roundId });
+          break;
+        }
+
+        // Update history fingerprints and tool history
+        this._round_turn_fingerprints.push({
+          botId: nextId,
+          hash: text.toLowerCase().replace(/[\s\p{P}]+/gu, ""),
+          textLen: text.length,
+        });
+        if (Array.isArray(result?.toolResults)) {
+          for (const tr of result.toolResults) {
+            this._round_tool_history.push({ botId: nextId, tool: tr.name, ok: Boolean(tr.ok), ts: Date.now() });
+          }
+        }
+
+        // --- Forward Progress Evaluation & Dynamic Extension (Feature 18) ---
+        const progress = this.evalForwardProgress(result, { botId: nextId });
+        if (progress.isProgress) {
+          this.consecutive_stagnant_turns = 0;
+          await this.extendRelayLimit(progress.grant, progress.reason);
+        } else {
+          this.consecutive_stagnant_turns += 1;
+          if (this.consecutive_stagnant_turns >= this.max_chatter_relays) {
+            log.info(`stagnant chatter limit reached in room ${this.room_id}`);
+            this.system_notices.push(`无实质进展的闲聊达到上限（${this.max_chatter_relays} 轮），本轮提前结束。`);
+            await this.emit("chatter_limit_tripped", {
+              relays: this.relays,
+              consecutive_stagnant: this.consecutive_stagnant_turns,
+              stagnant_turns: this.consecutive_stagnant_turns,
+            });
+            break;
+          }
         }
 
         this.relays += 1;
@@ -839,6 +1222,55 @@ export class Room {
           this.status = "paused";
           paused = true;
           await this.emit("circuit_breaker_tripped", { relays: this.relays, limit: this.relay_limit });
+          if (text) {
+            const record = { speaker: nextId, content: text, kind: "assistant", timestamp: nowIso() };
+            this.message_log.push(record);
+            this.updated_at = record.timestamp;
+            let messageSeq = null;
+            try {
+              const saved = this.store?.appendRoomMessage?.(this.room_id, {
+                speaker: nextId,
+                content: text,
+                kind: "assistant",
+                ts: record.timestamp,
+              });
+              messageSeq = Number(saved?.seq) || null;
+            } catch (err) {
+              log.warn("persist member message failed", err?.message || err);
+            }
+            let evidenceStatus = null;
+            if (messageSeq) {
+              try {
+                const verdict = this.evidenceStore?.record({
+                  roomId: this.room_id,
+                  botId: nextId,
+                  messageSeq,
+                  text,
+                  toolCalls: Array.isArray(result?.toolResults) ? result.toolResults : [],
+                });
+                evidenceStatus = verdict?.status || null;
+              } catch (err) {
+                log.warn("evidence record failed", err?.message || err);
+              }
+            }
+            this.mentionMembers(text, nextId);
+            spoken.push(nextId);
+            this._round_turns.push({
+              bot_id: nextId,
+              text,
+              evidence: evidenceStatus,
+              ms: Number(turnDurationMs) || 0,
+            });
+            await this.emit("turn_completed", {
+              ...record,
+              bot_id: nextId,
+              member: nextId,
+              ...(messageSeq ? { seq: messageSeq } : {}),
+              ...(evidenceStatus ? { evidence: evidenceStatus } : {}),
+              telemetry: result?.telemetry,
+              ms: turnDurationMs,
+            });
+          }
           break;
         }
 
@@ -857,7 +1289,6 @@ export class Room {
         } catch (err) {
           log.warn("persist member message failed", err?.message || err);
         }
-        // 证据阶梯：用真实的工具结局（BotRunner.toolResults）判定 observed / prepared / mismatch。
         let evidenceStatus = null;
         if (messageSeq) {
           try {
@@ -879,14 +1310,23 @@ export class Room {
           bot_id: nextId,
           text,
           evidence: evidenceStatus,
-          ms: Number(result?.ms) || 0,
+          ms: Number(turnDurationMs) || 0,
         });
-        await this.emit("turn_completed", { ...record, ...(messageSeq ? { seq: messageSeq } : {}), ...(evidenceStatus ? { evidence: evidenceStatus } : {}) });
+        await this.emit("turn_completed", {
+          ...record,
+          bot_id: nextId,
+          member: nextId,
+          ...(messageSeq ? { seq: messageSeq } : {}),
+          ...(evidenceStatus ? { evidence: evidenceStatus } : {}),
+          telemetry: result?.telemetry,
+          ms: turnDurationMs,
+        });
       }
     } catch (err) {
       log.error("round loop failed", err?.stack || err);
     } finally {
       this.round_running = Math.max(0, this.round_running - 1);
+      this._activeTurnController = null;
       await this.emit("round_completed", {
         round_id: roundId,
         speakers: spoken,
@@ -915,6 +1355,13 @@ export class Room {
       this._executionPlan = null;
       return null;
     }
+    if (this._executionPlan) {
+      const existingUnits = Object.keys(this._executionPlan.units || {});
+      const allPresent = tasks.every((t) => existingUnits.includes(t.id));
+      if (allPresent && existingUnits.length === tasks.length) {
+        return this._executionPlan;
+      }
+    }
     try {
       this._executionPlan = createExecutionPlan({
         units: tasks.map((t) => ({ id: t.id, bot_id: t.bot_id, depends_on: t.depends_on })),
@@ -927,16 +1374,16 @@ export class Room {
     return this._executionPlan;
   }
 
-  /** 下一个可执行单元对应的成员（依赖全部成功、本人未跑过、且有分派）。 */
-  _readyBot(seen) {
+  /** 下一个可执行单元对应的成员与单元 id。 */
+  _readyBotUnit(executedUnits = new Set()) {
     const plan = this._executionPlan;
     if (!plan) return null;
     try {
       for (const unitId of nextReady(plan)) {
+        if (executedUnits.has(unitId)) continue;
         const bot = String(plan.units?.[unitId]?.bot_id || "");
-        if (!bot || seen.has(bot)) continue;
-        if (!(this.pending_assignments[bot] || []).length) continue;
-        return bot;
+        if (!bot) continue;
+        return { botId: bot, unitId };
       }
     } catch (err) {
       log.warn("nextReady failed", err?.message || err);
@@ -944,14 +1391,32 @@ export class Room {
     return null;
   }
 
+  /** 下一个可执行单元对应的成员（依赖全部成功、本人未跑过、且有分派）。 */
+  _readyBot(seen) {
+    const ready = this._readyBotUnit(seen);
+    return ready ? ready.botId : null;
+  }
+
   /** 把一次成员回合的结果写进执行计划，并把新跳过的下游写进系统通知。 */
-  _markTaskResult(seen, botId, { ok, reason = null } = {}) {
+  _markTaskResult(seen, botId, { ok, reason = null } = {}, targetUnitId = null) {
     const plan = this._executionPlan;
     if (!plan) return [];
-    const ownUnits = (this.task_plan || []).filter((t) => String(t.bot_id) === String(botId)).map((t) => t.id);
+    let unitsToMark = [];
+    if (targetUnitId && plan.units?.[targetUnitId]) {
+      unitsToMark = [targetUnitId];
+    } else {
+      unitsToMark = (this.task_plan || [])
+        .filter((t) => String(t.bot_id) === String(botId) && !["done", "failed", "skipped"].includes(plan.states?.[t.id]))
+        .map((t) => t.id)
+        .slice(0, 1);
+      if (!unitsToMark.length) {
+        unitsToMark = (this.task_plan || []).filter((t) => String(t.bot_id) === String(botId)).map((t) => t.id);
+      }
+    }
+
     let current = plan;
     const skipped = [];
-    for (const unitId of ownUnits) {
+    for (const unitId of unitsToMark) {
       if (!current.units?.[unitId]) continue;
       try {
         const res = markResult(current, unitId, { ok, reason });
@@ -964,8 +1429,8 @@ export class Room {
     this._executionPlan = current;
     for (const unitId of [...new Set(skipped)]) {
       const bot = String(current.units?.[unitId]?.bot_id || "");
-      if (!bot || seen.has(bot)) continue;
-      seen.add(bot);
+      if (!bot) continue;
+      if (seen && typeof seen.add === "function") seen.add(bot);
       const why = current.skippedReason?.[unitId] || "上游失败";
       this.system_notices.push(`任务 ${unitId}（${bot}）被跳过：${truncate(why, 120)}`);
       void this.emit("task_skipped", { task_id: unitId, member: bot, reason: truncate(why, 200) });

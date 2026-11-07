@@ -13,12 +13,15 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { DIRS, assertNotC, ensureDirs, piProjectSettings } from "../config.js";
+import { DIRS, assertNotC, ensureDirs, piProjectSettings, TOOL_OUTPUT_CLAMP } from "../config.js";
 import { createLogger } from "../log.js";
 import { loadPi } from "./pi.js";
 import { archetypeOf, personaFor, roomContextBlock, ROOM_TOOL_NAMES, toolsetFor } from "./archetypes.js";
 import { createHooksExtension } from "../hooks.js";
 import { CORE_TOOLS, toolsForRole, resolveToolsets } from "../toolsets.js";
+import { clampToolOutput } from "./clamp.js";
+import { computeTurnTelemetry } from "./telemetry.js";
+
 
 const log = createLogger("engine.bot");
 
@@ -304,7 +307,12 @@ export class BotRunner {
         }
       },
     });
-    const extensions = [hooksExtension, this._createGuardExtension(), this._createToolEventExtension()];
+    const extensions = [
+      hooksExtension,
+      this._createGuardExtension(),
+      this._createToolEventExtension(),
+      this._createToolOutputClampExtension(),
+    ];
 
     const persona = this.buildPersona();
     const loader = new pi.DefaultResourceLoader({
@@ -380,6 +388,52 @@ export class BotRunner {
     };
   }
 
+  /** Tool output clamp extension: proactively truncates massive tool outputs at pi extension middleware. */
+  _createToolOutputClampExtension() {
+    const roomId = this.roomId;
+    const botId = this.botId;
+    const maxChars = this.roomContext?.settings?.tool_output_clamp_chars || TOOL_OUTPUT_CLAMP.maxChars;
+
+    return (pi) => {
+      pi.on("tool_result", async (event) => {
+        if (!TOOL_OUTPUT_CLAMP.enabled) return undefined;
+        if (!Array.isArray(event?.content)) return undefined;
+
+        let hasClamped = false;
+        const newContent = [];
+
+        for (const block of event.content) {
+          if (block && block.type === "text" && typeof block.text === "string" && block.text.length > maxChars) {
+            hasClamped = true;
+            const res = clampToolOutput(block.text, {
+              maxChars,
+              toolName: event.toolName,
+              toolCallId: event.toolCallId,
+              fileSpace: this.roomContext?.fileSpace,
+              roomId,
+            });
+            newContent.push({ type: "text", text: res.text });
+          } else {
+            newContent.push(block);
+          }
+        }
+
+        if (hasClamped) {
+          log.info(`[${botId}] clamped tool output for ${event.toolName}`);
+          return {
+            content: newContent,
+            details: {
+              ...(event.details || {}),
+              is_clamped: true,
+            },
+          };
+        }
+        return undefined;
+      });
+    };
+  }
+
+
   async _publish(kind, payload) {
     if (!this.events?.publish) return;
     try {
@@ -426,6 +480,7 @@ export class BotRunner {
     let usage = normalizeUsage(null);
     let error = null;
     let aborted = false;
+    let firstTokenAt = null;
     const emit = (event) => {
       if (!onToolEvent) return;
       try {
@@ -436,7 +491,8 @@ export class BotRunner {
     };
 
     if (signal?.aborted) {
-      return { text: "", usage, ms: 0, toolsUsed, aborted: true };
+      const abortReason = signal.reason ? (signal.reason instanceof Error ? signal.reason.message : String(signal.reason)) : "turn aborted";
+      return { text: "", usage, ms: 0, toolsUsed, toolResults: [], aborted: true, error: abortReason };
     }
 
     let session;
@@ -450,6 +506,7 @@ export class BotRunner {
         try {
           const type = event?.type;
           if (type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+            if (firstTokenAt === null) firstTokenAt = Date.now();
             const delta = String(event.assistantMessageEvent.delta || "");
             if (delta) {
               deltas.push(delta);
@@ -464,6 +521,7 @@ export class BotRunner {
             return;
           }
           if (type === "tool_execution_start") {
+            if (firstTokenAt === null) firstTokenAt = Date.now();
             const name = String(event.toolName || "");
             toolsUsed.push(name);
             emit({ type: "tool", tool: name, args: toolInputOf(event.args), toolCallId: event.toolCallId });
@@ -533,6 +591,20 @@ export class BotRunner {
         } catch {
           /* ignore */
         }
+        if (signal?.aborted || aborted) {
+          aborted = true;
+          const abortReason = signal?.reason
+            ? (signal.reason instanceof Error ? signal.reason.message : String(signal.reason))
+            : "turn aborted";
+          if (!error) error = abortReason;
+
+          if (session && !session.isIdle) {
+            try {
+              session.dispose?.();
+            } catch {}
+            this.session = null;
+          }
+        }
       }
 
       // Final safety net: if no deltas were observed (e.g. resumed session), ask the session.
@@ -545,13 +617,28 @@ export class BotRunner {
       error = String(err?.message || err);
       if (signal?.aborted || aborted) {
         aborted = true;
+        const abortReason = signal?.reason
+          ? (signal.reason instanceof Error ? signal.reason.message : String(signal.reason))
+          : "turn aborted";
+        if (!error) error = abortReason;
       }
       log.error(`${this.botId} turn failed: ${error}`);
     }
 
-    const ms = Date.now() - startedAt;
+    const endedAt = Date.now();
+    const telemetry = computeTurnTelemetry({ startedAt, firstTokenAt, endedAt, usage });
+    const ms = telemetry.total_ms;
     const text = String(authoritativeText || "").trim();
-    const result = { text, usage, ms, toolsUsed, toolResults, error: error || undefined, aborted: aborted || undefined };
+    const result = {
+      text,
+      usage,
+      ms,
+      telemetry,
+      toolsUsed,
+      toolResults,
+      error: error || undefined,
+      aborted: aborted || undefined,
+    };
 
     await this._publish("turn_completed", {
       member: this.botId,
@@ -559,6 +646,7 @@ export class BotRunner {
       text,
       usage,
       ms,
+      telemetry,
       tools_used: toolsUsed,
       ...(error ? { error } : {}),
     });
@@ -571,7 +659,11 @@ export class BotRunner {
           model: `${this.engine?.defaultModel?.provider || "magpie"}/${this.bot.model || this.engine?.defaultModelId || ""}`,
           input_tokens: usage.input,
           output_tokens: usage.output,
+          cache_read_tokens: usage.cacheRead || 0,
+          cache_write_tokens: usage.cacheWrite || 0,
           ms,
+          ttft_ms: telemetry.ttft_ms,
+          tps: telemetry.tps,
         });
       } catch (err) {
         log.debug("addUsage failed", err?.message || err);

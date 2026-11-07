@@ -170,8 +170,8 @@ function setRooms(rawRooms) {
   }
 }
 
-function newActivity() {
-  return { round: false, typing: new Set(), tools: new Map() };
+export function newActivity() {
+  return { round: false, typing: new Set(), tools: new Map(), turnTools: new Map() };
 }
 
 export async function refreshRooms() {
@@ -420,6 +420,7 @@ function mapRoomEvents(events) {
         ...base, type: "msg", speaker: String(p.speaker || p.member), content: String(p.content ?? ""),
         messageSeq: Number(p.seq) || null,
         evidence: normalizeEvidenceStatus(p.evidence),
+        tools: Array.isArray(p.tools) ? p.tools : [],
       });
     } else if (kind === "task_assigned" && (p.member || p.bot_id || p.assignee)) {
       items.push({
@@ -782,10 +783,14 @@ export function applyEvent(evt) {
                 break;
               }
             }
+            const turnToolsList = act.turnTools?.get(speaker) || [];
+            const completedTools = turnToolsList.length ? [...turnToolsList] : (Array.isArray(payload?.tools) ? payload.tools : []);
+            act.turnTools?.delete(speaker);
             const msg = {
               id: uid("m"), type: "msg", speaker: String(speaker), content: body, ts: stamp,
               messageSeq: Number(payload?.seq) || null,
               evidence: normalizeEvidenceStatus(payload?.evidence),
+              tools: completedTools,
             };
             changed = appendRoomEvent(roomId, msg) || changed;
             act.typing.delete(speaker);
@@ -921,13 +926,54 @@ export function applyEvent(evt) {
   const agentMatch = topic.match(/^(?:worker|agent)\.([^.]+)\.(turn_started|turn_completed|tool_invoked|tool_result|state_changed)$/);
   if (agentMatch) {
     const [, botId, kind] = agentMatch;
-    for (const roomId of activeRoomIdsFor(botId)) {
+    const threadRoom = evt.thread_id?.startsWith("room:") ? evt.thread_id.slice(5) : null;
+    const targetRoomIds = threadRoom ? [threadRoom] : activeRoomIdsFor(botId);
+    for (const roomId of targetRoomIds) {
       const act = state.activity[roomId];
       if (!act) continue;
-      if (kind === "turn_started") act.typing.add(botId);
-      if (kind === "turn_completed") { act.typing.delete(botId); act.tools.delete(botId); }
-      if (kind === "tool_invoked") act.tools.set(botId, { name: payload?.tool || "tool", args: payload?.args || {}, ts: Date.now() });
-      if (kind === "tool_result") act.tools.delete(botId);
+      if (!act.turnTools) act.turnTools = new Map();
+      if (kind === "turn_started") {
+        act.typing.add(botId);
+        act.turnTools.set(botId, []);
+      }
+      if (kind === "turn_completed") {
+        act.typing.delete(botId);
+        act.tools.delete(botId);
+      }
+      if (kind === "tool_invoked") {
+        const item = {
+          id: payload?.call_id || uid("tc"),
+          tool: payload?.tool || "tool",
+          name: payload?.tool || "tool",
+          params: payload?.args || {},
+          args: payload?.args || {},
+          status: "running",
+          state: "running",
+          ts: Date.now(),
+        };
+        act.tools.set(botId, item);
+        const list = act.turnTools.get(botId) || [];
+        list.push(item);
+        act.turnTools.set(botId, list);
+      }
+      if (kind === "tool_result") {
+        act.tools.delete(botId);
+        const list = act.turnTools.get(botId) || [];
+        const running = [...list].reverse().find(
+          (t) =>
+            (payload?.call_id ? t.id === payload.call_id : (t.tool === payload?.tool || t.name === payload?.tool)) &&
+            (t.status === "running" || t.state === "running")
+        );
+        if (running) {
+          running.status = payload?.ok ? "ok" : "error";
+          running.state = payload?.ok ? "success" : "error";
+          running.ok = Boolean(payload?.ok);
+          running.duration = payload?.ms ?? null;
+          running.ms = payload?.ms ?? null;
+          running.durationMs = payload?.ms ?? null;
+          running.output = payload?.summary || payload?.result || payload?.output || "";
+        }
+      }
       changed = true;
     }
     const bot = state.botsById[botId];

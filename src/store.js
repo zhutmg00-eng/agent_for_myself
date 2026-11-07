@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS tickets(id TEXT PRIMARY KEY, data TEXT);
 CREATE TABLE IF NOT EXISTS usage(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bot_id TEXT, room_id TEXT, model TEXT,
-  input_tokens INTEGER, output_tokens INTEGER, ms INTEGER, ts TEXT
+  input_tokens INTEGER, output_tokens INTEGER, ms INTEGER, ts TEXT,
+  ttft_ms INTEGER NOT NULL DEFAULT 0,
+  tps REAL NOT NULL DEFAULT 0.0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -154,6 +158,11 @@ export class Store {
     };
     // 房间级设置（disabled_toolsets / context budget …），JSON。
     addColumn("rooms", "settings_json", "settings_json TEXT");
+    // 遥测指标与缓存 Token 统计
+    addColumn("usage", "ttft_ms", "ttft_ms INTEGER NOT NULL DEFAULT 0");
+    addColumn("usage", "tps", "tps REAL NOT NULL DEFAULT 0.0");
+    addColumn("usage", "cache_read_tokens", "cache_read_tokens INTEGER NOT NULL DEFAULT 0");
+    addColumn("usage", "cache_write_tokens", "cache_write_tokens INTEGER NOT NULL DEFAULT 0");
   }
 
   close() {
@@ -526,39 +535,100 @@ export class Store {
 
   /* ---------------------------------------------------------------- usage */
 
-  addUsage({ bot_id = null, room_id = null, model = null, input_tokens = 0, output_tokens = 0, ms = 0 } = {}) {
+  addUsage({
+    bot_id = null,
+    room_id = null,
+    model = null,
+    input_tokens = 0,
+    output_tokens = 0,
+    cache_read_tokens = 0,
+    cache_write_tokens = 0,
+    ms = 0,
+    ttft_ms = 0,
+    tps = 0,
+  } = {}) {
     this.prepare(
-      "INSERT INTO usage(bot_id, room_id, model, input_tokens, output_tokens, ms, ts) VALUES(?,?,?,?,?,?,?)",
+      `INSERT INTO usage(bot_id, room_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, ms, ttft_ms, tps, ts)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       bot_id ? String(bot_id) : null,
       room_id ? String(room_id) : null,
       model ? String(model) : null,
       Number(input_tokens) || 0,
       Number(output_tokens) || 0,
+      Number(cache_read_tokens) || 0,
+      Number(cache_write_tokens) || 0,
       Number(ms) || 0,
+      Number(ttft_ms) || 0,
+      Number(tps) || 0,
       nowIso(),
     );
   }
 
-  usageSummary() {
-    const totals = this.prepare(
-      "SELECT COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, COALESCE(SUM(ms),0) AS ms FROM usage",
-    ).get();
-    const byBot = this.prepare(
-      "SELECT bot_id, COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, COALESCE(SUM(ms),0) AS ms FROM usage GROUP BY bot_id ORDER BY calls DESC",
-    ).all();
+  usageSummary({ allFields = false } = {}) {
+    const totals = this.prepare(`
+      SELECT COUNT(*) AS calls,
+             COALESCE(SUM(input_tokens),0) AS input,
+             COALESCE(SUM(output_tokens),0) AS output,
+             COALESCE(SUM(cache_read_tokens),0) AS cache_read,
+             COALESCE(SUM(cache_write_tokens),0) AS cache_write,
+             COALESCE(SUM(ms),0) AS ms,
+             COALESCE(AVG(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE NULL END), 0) AS avg_ttft_ms,
+             COALESCE(AVG(CASE WHEN tps > 0 THEN tps ELSE NULL END), 0) AS avg_tps
+        FROM usage
+    `).get();
+
+    const calls = Number(totals.calls || 0);
+    if (calls === 0 && !allFields) {
+      return {
+        calls: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        ms: 0,
+        by_bot: [],
+      };
+    }
+
+    const byBot = this.prepare(`
+      SELECT bot_id,
+             COUNT(*) AS calls,
+             COALESCE(SUM(input_tokens),0) AS input,
+             COALESCE(SUM(output_tokens),0) AS output,
+             COALESCE(SUM(cache_read_tokens),0) AS cache_read,
+             COALESCE(SUM(cache_write_tokens),0) AS cache_write,
+             COALESCE(SUM(ms),0) AS ms,
+             COALESCE(AVG(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE NULL END), 0) AS avg_ttft_ms,
+             COALESCE(AVG(CASE WHEN tps > 0 THEN tps ELSE NULL END), 0) AS avg_tps
+        FROM usage
+       GROUP BY bot_id
+       ORDER BY calls DESC
+    `).all();
+
     return {
-      calls: Number(totals.calls || 0),
+      calls,
       input_tokens: Number(totals.input || 0),
       output_tokens: Number(totals.output || 0),
+      cache_read: Number(totals.cache_read || 0),
+      cache_read_tokens: Number(totals.cache_read || 0),
+      cache_write: Number(totals.cache_write || 0),
+      cache_write_tokens: Number(totals.cache_write || 0),
       total_tokens: Number(totals.input || 0) + Number(totals.output || 0),
       ms: Number(totals.ms || 0),
+      avg_ttft_ms: Math.round(Number(totals.avg_ttft_ms || 0)),
+      avg_tps: Number(Number(totals.avg_tps || 0).toFixed(1)),
       by_bot: byBot.map((r) => ({
         bot_id: r.bot_id,
         calls: Number(r.calls),
         input_tokens: Number(r.input),
         output_tokens: Number(r.output),
+        cache_read: Number(r.cache_read || 0),
+        cache_read_tokens: Number(r.cache_read || 0),
+        cache_write: Number(r.cache_write || 0),
+        cache_write_tokens: Number(r.cache_write || 0),
         ms: Number(r.ms),
+        avg_ttft_ms: Math.round(Number(r.avg_ttft_ms || 0)),
+        avg_tps: Number(Number(r.avg_tps || 0).toFixed(1)),
       })),
     };
   }

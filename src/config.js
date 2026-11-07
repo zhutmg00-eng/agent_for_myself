@@ -161,3 +161,15 @@ export function piProjectSettings() {
     },
   };
 }
+
+/** 默认回合看门狗超时时间（30 秒，符合 PROJECT.md 契约）。 */
+export const DEFAULT_TURN_TIMEOUT_MS = 30_000;
+
+/** 工具输出截断配置（防止巨量输出撑爆 LLM 上下文与首字延迟）。 */
+export const TOOL_OUTPUT_CLAMP = {
+  enabled: process.env.FUSION_TOOL_OUTPUT_CLAMP !== "0",
+  maxChars: Math.max(1000, Number(process.env.FUSION_TOOL_OUTPUT_CLAMP_CHARS) || 12000),
+  headChars: Math.max(500, Number(process.env.FUSION_TOOL_OUTPUT_CLAMP_HEAD) || 6000),
+  tailChars: Math.max(500, Number(process.env.FUSION_TOOL_OUTPUT_CLAMP_TAIL) || 4000),
+};
+

@@ -128,7 +128,9 @@ async function main() {
   if (opts.port !== undefined) process.env.FUSION_PORT = String(opts.port);
   if (opts.host) process.env.FUSION_HOST = opts.host;
   if (!process.env.FUSION_DATA_ROOT) {
-    process.env.FUSION_DATA_ROOT = path.join("D:\\AgentFusion");
+    process.env.FUSION_DATA_ROOT = process.platform === "win32"
+      ? path.join("D:\\AgentFusion")
+      : path.join(os.homedir(), ".agent-fusion");
   }
 
   const config = await import("./config.js");

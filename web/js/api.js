@@ -213,6 +213,11 @@ export const api = {
   stats: () => request("/api/stats"),
   diagnostics: () => request("/api/diagnostics", { timeout: 8000 }),
 
+  memory: (limit = 50) => request(`/api/memory?limit=${encodeURIComponent(limit)}`, { timeout: 8000 }),
+  searchMemory: (q, limit = 20) =>
+    request(`/api/memory/search?q=${encodeURIComponent(q || "")}&limit=${encodeURIComponent(limit)}`, { timeout: 8000 }),
+  deleteMemory: (id) => request(`/api/memory/${encodeURIComponent(id)}`, { method: "DELETE", timeout: 8000 }),
+
   submitTask: (prompt) => request("/api/task", { method: "POST", body: { prompt } }),
   tickets: () => request("/api/tickets"),
   threads: () => request("/api/threads"),

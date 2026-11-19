@@ -6,7 +6,7 @@ import {
   activeMembers, roomTitle, childRooms, profileOf, uploadAvatar, resetAvatar,
   memberIdentity, refreshEvidence, evidenceSummaryOf,
 } from "../store.js";
-import { avatar, groupAvatar, userAvatar, profileFor, escapeHtml, customAvatarUrl } from "../avatars.js";
+import { avatar, groupAvatar, userAvatar, profileFor, escapeHtml, customAvatarUrl, roleIconSvg } from "../avatars.js";
 import {
   ICONS, $, $$, toast, openModal, closeModal, formatTime, fileName, fileBadge,
   scrollToBottom, isNearBottom, escapeAttr, pickAvatarFile, fileToAvatarDataUrl,
@@ -21,10 +21,10 @@ const POLICY_HINT = {
 };
 
 const SUGGESTIONS = [
-  { title: "让群主分派一个任务", body: "描述目标，Boss 拆解后分给合适的成员。" , prompt: "请群主分派：先了解这个目标，再拆成可执行的任务分给合适的成员。目标：" },
-  { title: "让文件管家归档", body: "成员产出统一存进群文件空间，用 file_id 引用。" , prompt: "请文件管家说明群文件空间怎么用，并演示归档一份说明。" },
-  { title: "让团队互相评审", body: "一个成员产出，另一个成员复核，群主汇总。" , prompt: "请群主安排：coder 出一份方案，reviewer 复核并指出问题，最后群主汇总。" },
-  { title: "拉一个小组讨论", body: "只邀请相关成员，在子群里讨论后回报结论。" , prompt: "请群主拉一个小群，只让 coder 和 reviewer 讨论当前任务的实现方案，结论回报本群。" },
+  { icon: "crown", title: "让群主分派一个任务", body: "描述目标，Boss 拆解后分给合适的成员。", prompt: "请群主分派：先了解这个目标，再拆成可执行的任务分给合适的成员。目标：" },
+  { icon: "folder", title: "让文件管家归档", body: "成员产出统一存进群文件空间，用 file_id 引用。", prompt: "请文件管家说明群文件空间怎么用，并演示归档一份说明。" },
+  { icon: "shieldCheck", title: "让团队互相评审", body: "一个成员产出，另一个成员复核，群主汇总。", prompt: "请群主安排：coder 出一份方案，reviewer 复核并指出问题，最后群主汇总。" },
+  { icon: "usersPlus", title: "拉一个小组讨论", body: "只邀请相关成员，在子群里讨论后回报结论。", prompt: "请群主拉一个小群，只让 coder 和 reviewer 讨论当前任务的实现方案，结论回报本群。" },
 ];
 
 /* 证据阶梯三态的界面口径，与 src/rooms/evidence.js:23 的 EVIDENCE_LABELS /
@@ -267,7 +267,7 @@ export class GroupView {
             <textarea id="g-input" rows="1" aria-label="群聊消息" placeholder="给群主下达任务，或 @成员 直接对话"></textarea>
             <div class="composer-bar">
               <div class="composer-bar-left">
-                <button class="composer-btn" id="btn-attach" type="button" title="添加附件" aria-label="添加附件">${ICONS.plus}</button>
+                <button class="composer-btn" id="btn-attach" type="button" title="添加附件" aria-label="添加附件">${ICONS.paperclip}</button>
                 <button class="composer-btn" id="g-plus" type="button" title="快捷动作" aria-label="快捷动作">${ICONS.spark}</button>
                 <span class="composer-policy-pill" id="composer-policy" title="上下文策略">
                   <span class="policy-dot"></span><span class="policy-text">共享全文</span>
@@ -728,7 +728,6 @@ export class GroupView {
         ${groupAvatar(room, 34, state.botsById)}
         <div class="view-head-main">
           <div class="view-title">
-            ${m.emoji ? `<span class="crown" aria-hidden="true">${escapeHtml(m.emoji)}</span>` : ""}
             <span class="room-title-text">${escapeHtml(roomTitle(room))}</span>
             ${room.topic ? `<span class="tag topic-pill" title="${escapeAttr(room.topic)}">${escapeHtml(room.topic)}</span>` : ""}
             <span class="tag policy-pill" title="${escapeAttr(POLICY_HINT[room.context_policy] || "")}"><span class="policy-dot"></span>${escapeHtml(POLICY_LABEL[room.context_policy] || "共享全文")}</span>
@@ -740,7 +739,7 @@ export class GroupView {
               const isOwner = id === room.owner_id;
               const isSelected = Boolean(activeMember && activeMember === id);
               return `<button class="mchip${isOwner ? " is-owner" : ""}${isSelected ? " is-selected" : ""}" type="button" data-goto-member="${escapeAttr(id)}" aria-pressed="${isSelected ? "true" : "false"}" title="${escapeAttr(`${idn.name} · ${idn.role} · ${idn.tagline}`)}">
-                <span class="mchip-emoji" aria-hidden="true">${escapeHtml(idn.emoji || "•")}</span>
+                <span class="mchip-ico" aria-hidden="true">${roleIconSvg(id, state.botsById[id])}</span>
                 <span class="mchip-name">${escapeHtml(idn.name)}</span>
                 <span class="mchip-badge">${isOwner ? "群主" : escapeHtml(idn.badge || idn.role)}</span>
               </button>`;
@@ -882,16 +881,18 @@ export class GroupView {
   }
 
   welcomeHTML(room) {
-    const members = room.members || [];
     return `
       <div class="welcome">
-        ${groupAvatar(room, 68, state.botsById)}
+        <div class="welcome-orb">${groupAvatar(room, 56, state.botsById)}</div>
         <h1>把任务交给团队</h1>
-        <p>群主会先拆解目标，再分派给合适的成员。产出自动进入群文件空间，全程可回看。</p>
+        <p>群主会先拆解目标，再分派给合适的成员。产出自动进入群文件空间，全程可追溯核验。</p>
         <div class="suggest-grid">
-          ${SUGGESTIONS.map((s, i) => `<button class="suggest-card" data-suggest="${i}"><b>${escapeHtml(s.title)}</b><span>${escapeHtml(s.body)}</span></button>`).join("")}
+          ${SUGGESTIONS.map((s, i) => `<button class="suggest-card" data-suggest="${i}" type="button">
+            <span class="suggest-ico" aria-hidden="true">${ICONS[s.icon] || ICONS.spark}</span>
+            <span class="suggest-copy"><b>${escapeHtml(s.title)}</b><span>${escapeHtml(s.body)}</span></span>
+          </button>`).join("")}
         </div>
-        <p class="welcome-note">想换成自己的角色？在「群信息 → 更换头像」或「设置 → 机器人」上传图片即可。</p>
+        <p class="welcome-note">可在右侧「群信息」调整成员权限，或在「设置 → 机器人」自定义成员头像与模型。</p>
       </div>`;
   }
 
@@ -963,8 +964,8 @@ export class GroupView {
     const toolsHTML = tools && tools.length ? toolsClusterHTML(tools) : "";
     const telem = item.telemetry || (item.tps || item.ttft_ms ? item : null);
     const telemetryPill = telem?.tps || telem?.ttft_ms
-      ? `<span class="msg-telemetry-pill" style="display:inline-flex;align-items:center;font-size:10px;padding:2px 6px;border-radius:10px;background:rgba(234,179,8,0.12);color:var(--amber,#d97706);font-weight:500;gap:3px" title="TTFT: ${telem.ttft_ms ?? 0}ms · 速率: ${telem.tps ?? 0} tok/s · 耗时: ${item.ms ?? telem.total_ms ?? 0}ms">⚡ ${telem.tps ?? 0} tok/s · ${telem.ttft_ms ?? 0}ms</span>`
-      : (item.ms ? `<span class="msg-telemetry-pill" style="display:inline-flex;align-items:center;font-size:10px;padding:2px 6px;border-radius:10px;background:rgba(234,179,8,0.12);color:var(--amber,#d97706);font-weight:500;gap:3px" title="耗时: ${item.ms}ms">⚡ ${item.ms}ms</span>` : "");
+      ? `<span class="msg-telemetry-pill" title="TTFT: ${telem.ttft_ms ?? 0}ms · 速率: ${telem.tps ?? 0} tok/s · 耗时: ${item.ms ?? telem.total_ms ?? 0}ms">${ICONS.bolt}<span>${telem.tps ?? 0} tok/s · ${telem.ttft_ms ?? 0}ms</span></span>`
+      : (item.ms ? `<span class="msg-telemetry-pill" title="耗时: ${item.ms}ms">${ICONS.bolt}<span>${item.ms}ms</span></span>` : "");
 
     return `<div class="msg-row is-bot is-assistant" data-role="assistant" data-msg-id="${escapeAttr(item.id || "")}">
       ${avatar(item.speaker, 30)}
@@ -1009,7 +1010,7 @@ export class GroupView {
       <div class="msg-card-head">
         <span class="kicker">任务分派</span>
         <span class="spacer"></span>
-        <span class="tag">${ownerIdn.emoji ? `${escapeHtml(ownerIdn.emoji)} ` : ""}${escapeHtml(ownerIdn.name)} 分派</span>
+        <span class="tag">${escapeHtml(ownerIdn.name)} 分派</span>
       </div>
       <div class="msg-card-body">
         ${rows.map((r) => {
@@ -1281,7 +1282,7 @@ export function groupInspectorHTML(roomId, tab = "members", selectedMember = nul
         </div>
         <h3>${escapeHtml(roomTitle(room))}</h3>
         <p>${members.length} 位成员 · 群主 ${escapeHtml(profileOf(room.owner_id).name)}</p>
-        <button class="btn sm ghost" data-group-edit style="margin-top:8px">编辑群资料</button>
+        <button class="btn sm secondary" data-group-edit>编辑群资料</button>
       </div>
       <div class="seg insp-tabs" role="tablist" style="margin-bottom:14px">
         <button data-tab="members" class="${activeTab === "members" ? "is-on" : ""}">成员 ${members.length}</button>
@@ -1317,13 +1318,20 @@ function membersTabHTML(room, members, activeMember = null) {
       const perm = room.member_permissions?.[id] || { can_speak: true, context_access: "full", can_create_subgroup: false };
       const isOwner = id === room.owner_id;
       const isSelected = Boolean(activeMember && activeMember === id);
+      const rawTag = String(idn.tagline || "").trim();
+      const cleanedTag = idn.role && rawTag.startsWith(`${idn.role} · `) ? rawTag.slice(idn.role.length + 3) : rawTag;
+      const roleLine = isOwner
+        ? "群主 · 分派任务 · 授权 · 决定共享范围"
+        : (idn.role && idn.role !== idn.name
+            ? (cleanedTag ? `${idn.role} · ${cleanedTag}` : idn.role)
+            : (cleanedTag || idn.role || ""));
       return `<div class="member-row${isSelected ? " is-selected" : ""}" data-member="${escapeAttr(id)}">
         ${avatar(id, 32)}
         <div class="member-copy">
-          <div class="member-name">${escapeHtml(idn.name)}${isOwner ? `<span class="owner-star" title="群主 · 可发言/分派/授权">👑</span>` : ""}
-            ${idn.badge && !isOwner ? `<span class="tag" style="height:15px;font-size:9.5px">${escapeHtml(idn.badge)}</span>` : ""}
+          <div class="member-name">${escapeHtml(idn.name)}${isOwner ? `<span class="owner-star" title="群主 · 可发言/分派/授权" aria-label="群主">${ICONS.crown}</span>` : ""}
+            ${idn.badge && !isOwner ? `<span class="tag is-xs">${escapeHtml(idn.badge)}</span>` : ""}
           </div>
-          <div class="member-role">${escapeHtml(isOwner ? "群主 · 分派任务 · 授权 · 决定共享范围" : `${idn.role} · ${idn.tagline}`)}</div>
+          <div class="member-role">${escapeHtml(roleLine)}</div>
         </div>
         <div class="member-tools">
           <button class="mini-toggle${perm.can_speak ? " is-on" : ""}" data-act="speak" title="${perm.can_speak ? "正在发言队列中（点击静音）" : "已静音（点击允许发言）"}">${perm.can_speak ? ICONS.sound : ICONS.mute}</button>

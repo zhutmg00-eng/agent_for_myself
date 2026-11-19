@@ -66,6 +66,7 @@ export function subscribe(fn) {
 
 export function emit() {
   for (const fn of Array.from(listeners)) {
+    if (!listeners.has(fn)) continue;
     try { fn(); } catch (err) { console.error("[store] listener failed", err); }
   }
 }
@@ -1117,8 +1118,8 @@ export function profileOf(botId) {
   return profileFor(botId, state.botsById[botId]);
 }
 
-/* Emoji/badge/tagline for a member, using backend bot records with local
- * archetype fallbacks (backend buildBot sends emoji + badge + tagline). */
+/* Identity/badge/tagline for a member, using backend bot records with local
+ * archetype fallbacks. Emojis are intentionally suppressed for vector UI consistency. */
 export function memberIdentity(botId) {
   const bot = state.botsById[botId] || {};
   const p = profileOf(botId);
@@ -1126,10 +1127,10 @@ export function memberIdentity(botId) {
     id: botId,
     name: p.name,
     role: p.role,
-    emoji: bot.emoji || p.emoji || "",
+    emoji: "",
     badge: bot.badge || p.badge || "",
     tagline: bot.tagline || p.tagline || "",
-    color: bot.color || p.color || "var(--text-2)",
+    color: p.color || bot.color || "var(--text-2)",
   };
 }
 

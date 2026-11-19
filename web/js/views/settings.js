@@ -6,9 +6,9 @@ import {
   uploadAvatar, resetAvatar, refreshHealth, refreshModels, refreshApprovals, pendingApprovalCount,
   refreshSkillProposals, reviewSkillProposal, adoptSkillProposal,
 } from "../store.js";
-import { avatar, userAvatar, profileFor, escapeHtml } from "../avatars.js";
+import { avatar, userAvatar, profileFor, escapeHtml, brandMarkSvg } from "../avatars.js";
 import {
-  ICONS, $, $$, toast, formatTokens, escapeAttr, pickAvatarFile, fileToAvatarDataUrl, relTime, formatTime,
+  ICONS, $, $$, toast, formatTokens, escapeAttr, pickAvatarFile, fileToAvatarDataUrl, relTime, formatTime, debounce,
 } from "../ui.js";
 
 export const NAV = [
@@ -49,6 +49,7 @@ const PROPOSAL_FILTERS = [
 ];
 
 let escHandler = null;
+let memoryViewState = { loaded: false, loading: false, query: "", entries: [], stats: null, results: null, error: "" };
 
 export function openSettings(opts = {}) {
   closeSettings();
@@ -89,6 +90,25 @@ export function openSettings(opts = {}) {
     refreshSkillProposals().then(() => render()).catch(() => render());
   };
 
+  const ensureMemory = () => {
+    if (memoryViewState.loading) return;
+    if (memoryViewState.loaded && !memoryViewState.error) return;
+    memoryViewState.loading = true;
+    api.memory(50).then((res) => {
+      memoryViewState.loaded = true;
+      memoryViewState.loading = false;
+      memoryViewState.entries = Array.isArray(res?.entries) ? res.entries : [];
+      memoryViewState.stats = res?.stats || null;
+      memoryViewState.error = "";
+      if (tab === "memory") render();
+    }).catch((err) => {
+      memoryViewState.loaded = true;
+      memoryViewState.loading = false;
+      memoryViewState.error = err?.message || "记忆服务不可用";
+      if (tab === "memory") render();
+    });
+  };
+
   const render = () => {
     state.skillProposals.open = tab === "skills";
     const content = contentFor(tab, selectedBot, { close, rerender: render, setTab: (t) => { tab = t; render(); }, setBot: (id) => { selectedBot = id; render(); } });
@@ -113,6 +133,7 @@ export function openSettings(opts = {}) {
     bindContent(shell, { close, rerender: render, tab, selectedBot, setBot: (id) => { selectedBot = id; render(); } });
     if (tab === "approvals") ensureApprovals();
     if (tab === "skills") ensureProposals();
+    if (tab === "memory") ensureMemory();
   };
   render();
   return { close };
@@ -461,24 +482,47 @@ function proposalCardHTML(p) {
 }
 
 function memoryTab() {
+  const m = memoryViewState;
+  const st = m.stats || {};
+  const totalCount = Number(st.total ?? st.count ?? m.entries.length ?? 0);
+  const pinnedCount = Number(st.pinned ?? m.entries.filter((e) => e.pinned).length ?? 0);
+  const activeList = m.query.trim() && Array.isArray(m.results) ? m.results : m.entries;
   return `
-    ${header("记忆", "持久事实、用户画像与 FTS5 外部索引（Hermes E28）")}
+    ${header("记忆", "持久事实、用户画像与 FTS5 混合检索（Hermes E28）")}
     <div class="settings-body">
+      ${m.error ? `<div class="appr-error">记忆服务不可用：${escapeHtml(m.error)}</div>` : ""}
       <div class="stat-grid">
-        <div class="stat-card"><div class="stat-label">持久记忆库</div><div class="stat-value">mem_entries</div><div class="stat-sub">SQLite + FTS5 全文索引</div></div>
-        <div class="stat-card"><div class="stat-label">目标维度</div><div class="stat-value">2<small>类</small></div><div class="stat-sub">memory（世界事实）+ user（用户偏好）</div></div>
-        <div class="stat-card"><div class="stat-label">检索机制</div><div class="stat-value">混合<small>检索</small></div><div class="stat-sub">FTS5 unicode61 + 二元组 Dice 打分</div></div>
-        <div class="stat-card"><div class="stat-label">单轮预算</div><div class="stat-value">2000<small>字</small></div><div class="stat-sub">半衰期 30 天自然遗忘</div></div>
+        <div class="stat-card"><div class="stat-label">已存记忆</div><div class="stat-value">${totalCount}<small>条</small></div><div class="stat-sub">SQLite + FTS5 全文索引</div></div>
+        <div class="stat-card"><div class="stat-label">置顶条目</div><div class="stat-value">${pinnedCount}<small>条</small></div><div class="stat-sub">memory 与 user 维度</div></div>
+        <div class="stat-card"><div class="stat-label">检索机制</div><div class="stat-value">混合<small>排序</small></div><div class="stat-sub">FTS5 unicode61 + 二元组 Dice</div></div>
+        <div class="stat-card"><div class="stat-label">单轮预算</div><div class="stat-value">2000<small>字</small></div><div class="stat-sub">半衰期 30 天自然衰减</div></div>
       </div>
 
       <div class="settings-section">
-        <h3>记忆检索测试</h3>
+        <h3>记忆检索与管理</h3>
         <div class="set-card">
           <div class="set-row">
-            <div class="set-copy"><div class="set-name">查询关键字</div><div class="set-desc">测试 FTS5 与 CJK 二元组混合排序命中率</div></div>
-            <input class="input" style="width:260px" placeholder="输入关键字检索跨会话记忆…">
+            <div class="set-copy"><div class="set-name">实时检索</div><div class="set-desc">输入关键词即时测试 FTS5 与 CJK 二元组混合排序</div></div>
+            <div class="mem-search-wrap">
+              <input class="input mem-search-input" id="mem-search-input" value="${escapeAttr(m.query)}" placeholder="输入关键字检索跨会话记忆…">
+              <button class="btn sm" id="mem-refresh" type="button">${ICONS.refresh} 刷新</button>
+            </div>
           </div>
-          <div class="empty-mini" style="padding:14px 18px">当前记忆库运行正常；各成员在对话中可通过 memory 工具持久化事实并自动在提示词注入。</div>
+          <div class="mem-list" id="mem-list">
+            ${activeList.length ? activeList.map((entry) => `
+              <div class="mem-row" data-mem-id="${escapeAttr(entry.id || "")}">
+                <div class="mem-row-main">
+                  <div class="mem-row-meta">
+                    <span class="tag ${entry.target === "user" ? "accent" : ""}">${escapeHtml(entry.target || "memory")}</span>
+                    ${entry.scope ? `<span class="tag">${escapeHtml(entry.scope)}</span>` : ""}
+                    ${entry.pinned ? `<span class="tag amber">置顶</span>` : ""}
+                    ${entry.score !== undefined ? `<span class="mem-score">匹配度 ${Number(entry.score).toFixed(2)}</span>` : ""}
+                  </div>
+                  <div class="mem-row-content">${escapeHtml(entry.content || "")}</div>
+                </div>
+                ${entry.id ? `<button class="btn sm ghost danger" type="button" data-mem-del="${escapeAttr(entry.id)}" title="删除此条记忆" aria-label="删除">${ICONS.trash}</button>` : ""}
+              </div>`).join("") : `<div class="empty-mini">${m.loading ? "正在加载记忆库…" : m.query.trim() ? "没有检索到匹配的记忆条目。" : "记忆库当前为空；各成员在对话中通过 memory 工具持久化事实后将展示在此。"}</div>`}
+          </div>
         </div>
       </div>
     </div>`;
@@ -515,15 +559,15 @@ function usageTab() {
 
       <div class="settings-section">
         <h3>成员测速榜单</h3>
-        <div class="set-card" style="padding:0;overflow:hidden">
-          <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <div class="set-card data-table-card">
+          <table class="data-table">
             <thead>
-              <tr style="text-align:left;color:var(--text-3);border-bottom:1px solid var(--border, var(--line));background:rgba(255,255,255,0.02)">
-                <th style="padding:8px 12px">成员</th>
-                <th style="padding:8px 12px">调用次数</th>
-                <th style="padding:8px 12px">Token 总量</th>
-                <th style="padding:8px 12px">平均 TTFT</th>
-                <th style="padding:8px 12px">生成速率</th>
+              <tr>
+                <th>成员</th>
+                <th>调用次数</th>
+                <th>Token 总量</th>
+                <th>平均 TTFT</th>
+                <th>生成速率</th>
               </tr>
             </thead>
             <tbody>
@@ -531,16 +575,16 @@ function usageTab() {
                 const p = profileFor(b.bot_id, state.botsById[b.bot_id]);
                 const bCalls = b.messages_count ?? b.calls ?? 0;
                 const bTokens = b.tokens ?? 0;
-                const bTtft = b.avg_ttft_ms ? `${b.avg_ttft_ms}ms` : "-";
-                const bTps = b.avg_tps ? `${b.avg_tps} tok/s` : "-";
-                return `<tr style="border-bottom:1px solid var(--border-light, rgba(255,255,255,0.04))">
-                  <td style="padding:8px 12px;display:flex;align-items:center;gap:8px">${avatar(b.bot_id, 20)}<span style="font-weight:500">${escapeHtml(p.name)}</span></td>
-                  <td style="padding:8px 12px">${bCalls} 次</td>
-                  <td style="padding:8px 12px">${formatTokens(bTokens)} tok</td>
-                  <td style="padding:8px 12px">${bTtft}</td>
-                  <td style="padding:8px 12px;color:var(--amber, #f59e0b)">${bTps}</td>
+                const bTtft = b.avg_ttft_ms ? `${b.avg_ttft_ms}ms` : "—";
+                const bTps = b.avg_tps ? `${b.avg_tps} tok/s` : "—";
+                return `<tr>
+                  <td><div class="table-member">${avatar(b.bot_id, 22)}<span>${escapeHtml(p.name)}</span></div></td>
+                  <td class="is-num">${bCalls} 次</td>
+                  <td class="is-num">${formatTokens(bTokens)} tok</td>
+                  <td class="is-num">${bTtft}</td>
+                  <td class="is-num is-highlight">${bTps}</td>
                 </tr>`;
-              }).join("") || `<tr><td colspan="5" style="padding:14px;text-align:center;color:var(--text-3)">暂无测速记录</td></tr>`}
+              }).join("") || `<tr><td colspan="5" class="table-empty">暂无测速记录</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -630,19 +674,19 @@ function aboutTab() {
   return `
     ${header("关于", "群聊智能体工作台 · pi 内核")}
     <div class="settings-body">
-      <div style="display:flex;align-items:center;gap:16px;padding:10px 0 20px">
-        <span class="avatar has-emoji" style="width:56px;height:56px;background:var(--accent-soft);font-size:26px" aria-hidden="true">🧠</span>
+      <div class="about-hero">
+        <span class="about-brand-badge" aria-hidden="true">${brandMarkSvg(28)}</span>
         <div>
-          <div style="font-size:18px;font-weight:600">AgentFusion</div>
+          <div class="about-brand-name">AgentFusion</div>
           <div class="set-desc">群聊智能体工作台 · pi 内核</div>
         </div>
       </div>
       <div class="set-card">
-        <div class="set-row"><div class="set-copy"><div class="set-name">内核</div><div class="set-desc">${escapeHtml(kernelLabel)}（@earendil-works/pi-coding-agent）：工具循环、会话分支、上下文压缩、技能与扩展</div></div><div class="set-value">${escapeHtml(kernelVersion)}</div></div>
-        <div class="set-row"><div class="set-copy"><div class="set-name">运行方式</div><div class="set-desc">Electron 桌面壳 + 本地 Node 服务；前端纯静态（ES module、无构建、无外网资源）</div></div></div>
-        <div class="set-row"><div class="set-copy"><div class="set-name">数据目录</div><div class="set-desc">${escapeHtml(dataRoot || "D:\\AgentFusion")}</div></div></div>
-        <div class="set-row"><div class="set-copy"><div class="set-name">模型网关</div><div class="set-desc">${escapeHtml(gateway || "http://127.0.0.1:3425/v1")}</div></div></div>
-        <div class="set-row"><div class="set-copy"><div class="set-name">致谢</div><div class="set-desc">群聊协作模型参考 DS-Bot 的公开设计；头像与界面素材为本项目原创</div></div></div>
+        <div class="set-row"><div class="set-copy"><div class="set-name">内核</div><div class="set-desc">${escapeHtml(kernelLabel)}（@earendil-works/pi-coding-agent）：工具循环、会话分支、上下文压缩、技能与扩展</div></div><div class="set-value is-mono">${escapeHtml(kernelVersion)}</div></div>
+        <div class="set-row"><div class="set-copy"><div class="set-name">运行方式</div><div class="set-desc">Electron 桌面壳 + 本地 Node 服务；纯原生静态 ES Module 前端架构</div></div></div>
+        <div class="set-row"><div class="set-copy"><div class="set-name">数据目录</div><div class="set-desc is-mono">${escapeHtml(dataRoot || "D:\\AgentFusion")}</div></div></div>
+        <div class="set-row"><div class="set-copy"><div class="set-name">模型网关</div><div class="set-desc is-mono">${escapeHtml(gateway || "http://127.0.0.1:3425/v1")}</div></div></div>
+        <div class="set-row"><div class="set-copy"><div class="set-name">致谢</div><div class="set-desc">群聊协作模型参考 DS-Bot 的公开设计；图标与界面体系为项目原创</div></div></div>
       </div>
     </div>`;
 }
@@ -832,6 +876,68 @@ function bindContent(root, ctx) {
       } catch (err) {
         $$("button", card).forEach((b) => { b.disabled = false; });
         toast(`${decision === "reject" ? "拒绝" : "延后"}失败：${err.message}`, "error");
+      }
+    });
+  }
+  if (ctx.tab === "memory") {
+    const searchInput = $("#mem-search-input", root);
+    const runSearch = debounce(async () => {
+      const q = searchInput?.value?.trim() || "";
+      memoryViewState.query = q;
+      if (!q) {
+        memoryViewState.results = null;
+        ctx.rerender();
+        return;
+      }
+      try {
+        const res = await api.searchMemory(q, 20);
+        memoryViewState.results = Array.isArray(res?.results) ? res.results : [];
+        memoryViewState.error = "";
+        ctx.rerender();
+        const nextInput = $("#mem-search-input", document);
+        if (nextInput) {
+          nextInput.focus();
+          nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
+        }
+      } catch (err) {
+        memoryViewState.error = err.message;
+        ctx.rerender();
+      }
+    }, 220);
+
+    searchInput?.addEventListener("input", runSearch);
+    $("#mem-refresh", root)?.addEventListener("click", async () => {
+      memoryViewState.loaded = false;
+      memoryViewState.query = "";
+      memoryViewState.results = null;
+      try {
+        const res = await api.memory(50);
+        memoryViewState.loaded = true;
+        memoryViewState.entries = Array.isArray(res?.entries) ? res.entries : [];
+        memoryViewState.stats = res?.stats || null;
+        memoryViewState.error = "";
+        toast("记忆库已刷新", "success");
+        ctx.rerender();
+      } catch (err) {
+        toast(`刷新失败：${err.message}`, "error");
+      }
+    });
+    $("#mem-list", root)?.addEventListener("click", async (ev) => {
+      const delBtn = ev.target.closest("[data-mem-del]");
+      if (!delBtn) return;
+      const id = delBtn.dataset.memDel;
+      delBtn.disabled = true;
+      try {
+        await api.deleteMemory(id);
+        memoryViewState.entries = memoryViewState.entries.filter((e) => e.id !== id);
+        if (Array.isArray(memoryViewState.results)) {
+          memoryViewState.results = memoryViewState.results.filter((e) => e.id !== id);
+        }
+        toast("记忆条目已删除", "success");
+        ctx.rerender();
+      } catch (err) {
+        delBtn.disabled = false;
+        toast(`删除失败：${err.message}`, "error");
       }
     });
   }

@@ -3,15 +3,15 @@
 import { state, subscribe, submitChief, refreshContext } from "../store.js";
 import { avatar, userAvatar, profileFor, escapeHtml } from "../avatars.js";
 import {
-  ICONS, $, $$, toast, formatTokens, escapeAttr, scrollToBottom, isNearBottom,
+  ICONS, $, $$, toast, formatTokens, scrollToBottom, isNearBottom,
 } from "../ui.js";
 import { renderMarkdown } from "../markdown.js";
 
 const SUGGESTIONS = [
-  { title: "规划并执行一个多步任务", body: "Chief 先拆解，再调度合适的 Worker。", prompt: "帮我完成一个多步任务：先分析需求并拆解，再分派给合适的成员执行，最后汇总结果。任务：" },
-  { title: "调研并写成报告", body: "搜索、整理、成稿，一条链路走完。", prompt: "调研这个主题并写一份结构化报告，最后给出结论与建议。主题：" },
-  { title: "检查现有项目", body: "读代码、找问题、给出修改建议。", prompt: "检查当前工作区的项目：找出最值得修的三个问题，给出证据和修改建议。范围：" },
-  { title: "整理工作区文件", body: "盘点、归类、产出清单。", prompt: "盘点当前工作区的文件，按用途归类，指出重复与过期文件，产出一份清单。" },
+  { icon: "layers", title: "规划并执行一个多步任务", body: "Chief 先拆解，再调度合适的 Worker。", prompt: "帮我完成一个多步任务：先分析需求并拆解，再分派给合适的成员执行，最后汇总结果。任务：" },
+  { icon: "compass", title: "调研并写成报告", body: "搜索、整理、成稿，一条链路走完。", prompt: "调研这个主题并写一份结构化报告，最后给出结论与建议。主题：" },
+  { icon: "shieldCheck", title: "检查现有项目", body: "读代码、找问题、给出修改建议。", prompt: "检查当前工作区的项目：找出最值得修的三个问题，给出证据和修改建议。范围：" },
+  { icon: "folder", title: "整理工作区文件", body: "盘点、归类、产出清单。", prompt: "盘点当前工作区的文件，按用途归类，指出重复与过期文件，产出一份清单。" },
 ];
 
 export class ChiefView {
@@ -26,13 +26,17 @@ export class ChiefView {
       <div class="chat-body" id="c-scroll"><div class="chat-inner" id="c-inner"></div></div>
       <div class="composer-wrap">
         <div class="composer-inner">
-          <div class="composer">
-            <textarea id="c-input" rows="1" aria-label="给 Chief 的消息" placeholder="今天想让团队做什么？"></textarea>
+          <div class="composer floating-dock">
+            <textarea id="c-input" rows="1" aria-label="给 Chief 的消息" placeholder="描述你的目标，Chief 会拆解并调度团队执行…"></textarea>
             <div class="composer-bar">
-              <button class="composer-plus" id="c-plus" title="提示" aria-label="提示">${ICONS.spark}</button>
-              <span class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
-              <span class="composer-model">${escapeHtml(modelShort())}</span>
-              <button class="send-btn" id="c-send" title="发送" aria-label="发送">${ICONS.send}</button>
+              <div class="composer-bar-left">
+                <button class="composer-btn" id="c-plus" type="button" title="调度说明" aria-label="提示">${ICONS.spark}</button>
+                <span class="composer-model">${escapeHtml(modelShort())}</span>
+              </div>
+              <span class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+              <div class="composer-bar-right">
+                <button class="send-btn" id="c-send" type="button" title="发送" aria-label="发送" disabled>${ICONS.send}</button>
+              </div>
             </div>
           </div>
         </div>
@@ -47,7 +51,7 @@ export class ChiefView {
     const input = this.el.input;
     const autosize = () => {
       input.style.height = "auto";
-      input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+      input.style.height = `${Math.max(40, Math.min(input.scrollHeight, 160))}px`;
       this.el.send.disabled = !input.value.trim() || state.chief.active;
     };
     input.addEventListener("input", autosize);
@@ -73,7 +77,7 @@ export class ChiefView {
     const text = input.value.trim();
     if (!text || state.chief.active) return;
     input.value = "";
-    input.style.height = "auto";
+    input.style.height = "40px";
     this.el.send.disabled = true;
     this.userScrolled = false;
     try {
@@ -98,14 +102,15 @@ export class ChiefView {
     const chief = profileFor("ChiefRouter", state.botsById.ChiefRouter);
     const ctx = state.context || {};
     const pct = Number(ctx.usage_percentage || 0);
+    const isInfoOn = state.inspector?.type === "chief";
     this.el.head.innerHTML = `
-      ${avatar("ChiefRouter", 30)}
+      ${avatar("ChiefRouter", 32)}
       <div class="view-head-main">
-        <div class="view-title">${escapeHtml(chief.name)} <span class="tag">总管</span>${state.chief.active ? `<span class="tag accent">工作中</span>` : ""}</div>
+        <div class="view-title">${escapeHtml(chief.name)} <span class="tag">总管</span>${state.chief.active ? `<span class="tag accent">调度中</span>` : ""}</div>
         <div class="view-sub">${escapeHtml(chief.tagline)} · 上下文 ${formatTokens(ctx.active_tokens)} / ${formatTokens(ctx.max_context_tokens || 1_000_000)} (${pct.toFixed(1)}%)</div>
       </div>
       <div class="head-actions">
-        <button class="head-btn icon-only" id="c-info" title="上下文与用量">${ICONS.chart}</button>
+        <button class="head-btn${isInfoOn ? " is-on" : ""}" id="c-info" title="上下文与用量">${ICONS.chart}<span>用量</span></button>
       </div>`;
     $("#c-info", this.el.head).onclick = () => {
       state.inspector = state.inspector?.type === "chief" ? null : { type: "chief" };
@@ -131,11 +136,11 @@ export class ChiefView {
     }
     if (chief.active) {
       const p = profileFor("ChiefRouter", state.botsById.ChiefRouter);
-      blocks.push(`<div class="msg-row is-bot">
+      blocks.push(`<div class="msg-row is-bot is-assistant">
         ${avatar("ChiefRouter", 30)}
         <div class="msg-main">
           <div class="msg-head"><span class="msg-name" style="color:${p.color}">${escapeHtml(p.name)}</span><span class="msg-tag">总管</span></div>
-          <div class="bubble">${chief.streamText ? renderMarkdown(chief.streamText) + `<span class="stream-caret"></span>` : `<span style="color:var(--text-3)">正在拆解目标</span><span class="typing-dots"><i></i><i></i><i></i></span>`}</div>
+          <div class="bubble markdown-body">${chief.streamText ? renderMarkdown(chief.streamText) + `<span class="stream-caret"></span>` : `<span class="stream-thinking">正在拆解目标</span><span class="typing-dots"><i></i><i></i><i></i></span>`}</div>
         </div>
       </div>`);
     }
@@ -149,20 +154,52 @@ export class ChiefView {
       btn.onclick = async () => {
         const bubble = btn.closest(".msg-main")?.querySelector(".bubble");
         if (!bubble) return;
-        try { await navigator.clipboard.writeText(bubble.innerText); toast("已复制", "success"); }
-        catch { toast("复制失败，请手动选择文本", "error"); }
+        try {
+          await navigator.clipboard.writeText(bubble.innerText || bubble.textContent || "");
+          const orig = btn.innerHTML;
+          btn.textContent = "已复制";
+          setTimeout(() => { btn.innerHTML = orig; }, 1500);
+          toast("已复制", "success");
+        } catch {
+          toast("复制失败，请手动选择文本", "error");
+        }
       };
+    });
+    $$(".markdown-body pre", this.el.inner).forEach((pre) => {
+      if (pre.querySelector(".code-copy-btn")) return;
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "code-copy-btn";
+      copyBtn.title = "复制代码";
+      copyBtn.setAttribute("aria-label", "复制代码");
+      copyBtn.innerHTML = ICONS.copy;
+      copyBtn.onclick = async (ev) => {
+        ev.stopPropagation();
+        const codeText = pre.querySelector("code")?.innerText || pre.innerText || "";
+        try {
+          await navigator.clipboard.writeText(codeText);
+          copyBtn.textContent = "已复制";
+          setTimeout(() => { copyBtn.innerHTML = ICONS.copy; }, 1500);
+          toast("代码已复制", "success");
+        } catch {
+          toast("复制代码失败", "error");
+        }
+      };
+      pre.appendChild(copyBtn);
     });
   }
 
   welcomeHTML() {
     return `
       <div class="welcome">
-        <div class="welcome-orb">${avatar("ChiefRouter", 76)}</div>
+        <div class="welcome-orb">${avatar("ChiefRouter", 56)}</div>
         <h1>今天想让团队做什么？</h1>
-        <p>说一句目标就行。Chief 会拆解任务、调度成员、把结果汇总给你。</p>
+        <p>直接陈述目标，Chief 会拆解子任务、调度合适成员并将结果汇总交付。</p>
         <div class="suggest-grid">
-          ${SUGGESTIONS.map((s, i) => `<button class="suggest-card" data-suggest="${i}"><b>${escapeHtml(s.title)}</b><span>${escapeHtml(s.body)}</span></button>`).join("")}
+          ${SUGGESTIONS.map((s, i) => `<button class="suggest-card" data-suggest="${i}" type="button">
+            <span class="suggest-ico" aria-hidden="true">${ICONS[s.icon] || ICONS.spark}</span>
+            <span class="suggest-copy"><b>${escapeHtml(s.title)}</b><span>${escapeHtml(s.body)}</span></span>
+          </button>`).join("")}
         </div>
       </div>`;
   }
@@ -180,10 +217,10 @@ export class ChiefView {
 
   messageHTML(m) {
     if (m.speaker === "user") {
-      return `<div class="msg-row is-user">
+      return `<div class="msg-row is-user" data-role="user">
         <div class="msg-main">
           <div class="msg-head"><span class="msg-name">你</span></div>
-          <div class="bubble">${renderMarkdown(m.content)}</div>
+          <div class="bubble markdown-body is-user-bubble">${renderMarkdown(m.content)}</div>
         </div>
         <span class="msg-av">${userAvatar(28)}</span>
       </div>`;
@@ -192,15 +229,17 @@ export class ChiefView {
       return `<div class="sysline">${ICONS.info}<span>${escapeHtml(m.content)}</span></div>`;
     }
     const p = profileFor("ChiefRouter", state.botsById.ChiefRouter);
-    return `<div class="msg-row is-bot">
+    return `<div class="msg-row is-bot is-assistant" data-role="assistant">
       ${avatar("ChiefRouter", 30)}
       <div class="msg-main">
         <div class="msg-head">
           <span class="msg-name" style="color:${p.color}">${escapeHtml(p.name)}</span>
           <span class="msg-tag">总管</span>
-          <button class="msg-copy" type="button" title="复制内容" aria-label="复制内容">${ICONS.copy}</button>
         </div>
-        <div class="bubble">${renderMarkdown(m.content)}</div>
+        <div class="bubble markdown-body">${renderMarkdown(m.content)}</div>
+        <div class="msg-toolbar">
+          <button class="msg-copy" type="button" title="复制内容" aria-label="复制内容">${ICONS.copy} 复制</button>
+        </div>
       </div>
     </div>`;
   }
@@ -252,30 +291,33 @@ export function chiefInspectorHTML() {
   ];
   const usd = state.stats?.tokens || ctx.tokens_total || {};
   return `
-    <div class="insp-head"><h2>上下文与用量</h2><button class="insp-close" data-insp-close>${ICONS.close}</button></div>
+    <div class="insp-head">
+      <div class="insp-title-wrap"><h2>上下文与用量</h2></div>
+      <button class="insp-close" data-insp-close aria-label="关闭">${ICONS.close}</button>
+    </div>
     <div class="insp-body">
-      <div class="stat-grid" style="grid-template-columns:repeat(2,1fr)">
-        <div class="stat-card"><div class="stat-label">当前上下文</div><div class="stat-value">${formatTokens(ctx.active_tokens)}<small>tokens</small></div><div class="stat-sub">上限 ${formatTokens(ctx.max_context_tokens || 1_000_000)}</div></div>
+      <div class="stat-grid is-two-col">
+        <div class="stat-card"><div class="stat-label">当前上下文</div><div class="stat-value">${formatTokens(ctx.active_tokens)}<small>tok</small></div><div class="stat-sub">上限 ${formatTokens(ctx.max_context_tokens || 1_000_000)}</div></div>
         <div class="stat-card"><div class="stat-label">缓存命中率</div><div class="stat-value">${Math.round((ctx.cache_hit_rate || 0) * 100)}<small>%</small></div><div class="stat-sub">本次输入 ${formatTokens(usd.prompt)}</div></div>
       </div>
-      <div class="section-label">构成 <span class="count">${formatTokens(total)} tokens</span></div>
-      <div class="set-card" style="padding:12px 14px">
-        ${rows.map(([label, value, color]) => `<div class="bar-row" style="margin:8px 0">
-          <span class="bar-name" style="width:72px">${label}</span>
+      <div class="section-label">构成 <span class="count">${formatTokens(total)} tok</span></div>
+      <div class="set-card bar-card">
+        ${rows.map(([label, value, color]) => `<div class="bar-row">
+          <span class="bar-name">${label}</span>
           <span class="bar-track"><span class="bar-fill" style="width:${Math.round(value / total * 100)}%;background:${color}"></span></span>
           <span class="bar-value">${formatTokens(value)}</span>
         </div>`).join("")}
       </div>
       <div class="section-label">成员用量</div>
-      <div class="set-card" style="padding:12px 14px">
-        ${(ctx.bots || []).map((b) => `<div class="bar-row" style="margin:8px 0">
+      <div class="set-card bar-card">
+        ${(ctx.bots || []).map((b) => `<div class="bar-row">
           ${avatar(b.bot_id, 22)}
-          <span class="bar-name" style="width:72px">${escapeHtml(profileFor(b.bot_id, state.botsById[b.bot_id]).name)}</span>
+          <span class="bar-name">${escapeHtml(profileFor(b.bot_id, state.botsById[b.bot_id]).name)}</span>
           <span class="bar-track"><span class="bar-fill" style="width:${Math.min(100, Math.round((b.tokens || 0) / Math.max(1, ctx.active_tokens) * 100))}%"></span></span>
           <span class="bar-value">${formatTokens(b.tokens)}</span>
         </div>`).join("") || `<div class="empty-mini">还没有成员用量记录</div>`}
       </div>
       <div class="section-label">模型</div>
-      <div class="set-card"><div class="set-row"><div class="set-copy"><div class="set-name">${escapeHtml(state.settings?.model || "")}</div><div class="set-desc">${escapeHtml(state.settings?.gateway_url || "")}</div></div></div></div>
+      <div class="set-card"><div class="set-row"><div class="set-copy"><div class="set-name is-mono">${escapeHtml(state.settings?.model || "未配置")}</div><div class="set-desc">${escapeHtml(state.settings?.gateway_url || "")}</div></div></div></div>
     </div>`;
 }

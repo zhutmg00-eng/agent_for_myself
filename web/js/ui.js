@@ -1,4 +1,4 @@
-/* Shared UI primitives: icons, toast, modal, formatting. */
+/* Shared UI primitives: cohesive 1.5px SVG icons, toast, modal, formatting. Zero emojis. */
 
 export const ICONS = {
   search: `<svg viewBox="0 0 20 20"><circle cx="8.8" cy="8.8" r="4.7"/><path d="m12.4 12.4 3.3 3.3"/></svg>`,
@@ -31,6 +31,15 @@ export const ICONS = {
   moon: `<svg viewBox="0 0 20 20"><path d="M15.7 12.2A6.3 6.3 0 0 1 7.8 4.3a6.3 6.3 0 1 0 7.9 7.9Z"/></svg>`,
   spark: `<svg viewBox="0 0 20 20"><path d="M10 3.2c.5 3.5 1.9 5 5.4 5.6-3.5.6-4.9 2.1-5.4 5.6-.5-3.5-1.9-5-5.4-5.6 3.5-.6 4.9-2.1 5.4-5.6Z"/><path d="M15.2 13.4c.2 1.4.8 2 2.2 2.3-1.4.2-2 .9-2.2 2.3-.2-1.4-.8-2.1-2.2-2.3 1.4-.3 2-.9 2.2-2.3Z"/></svg>`,
   spinner: `<svg viewBox="0 0 20 20" class="spin"><path d="M10 3.2a6.8 6.8 0 1 0 6.8 6.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  crown: `<svg viewBox="0 0 20 20"><path d="M3.5 14.5h13l-1.2-7.4-3.3 2.8L10 5.5 8 9.9 4.7 7.1 3.5 14.5Z"/><path d="M4.2 16.5h11.6"/></svg>`,
+  bolt: `<svg viewBox="0 0 20 20"><path d="M11 2.8 4.8 11h4.8l-.6 6.2L15.2 9h-4.8l.6-6.2Z"/></svg>`,
+  layers: `<svg viewBox="0 0 20 20"><path d="M10 3.5 3.5 7 10 10.5 16.5 7 10 3.5Z"/><path d="m3.5 10.4 6.5 3.4 6.5-3.4M3.5 13.6 10 17l6.5-3.4"/></svg>`,
+  compass: `<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.7"/><path d="m12.8 7.2-1.6 4.2-4 1.4 1.6-4.2 4-1.4Z"/></svg>`,
+  shieldCheck: `<svg viewBox="0 0 20 20"><path d="M10 3.2 4.2 5.4v4.2c0 3.8 2.5 6.4 5.8 7.6 3.3-1.2 5.8-3.8 5.8-7.6V5.4L10 3.2Z"/><path d="m7.5 10.1 1.8 1.8 3.5-3.6"/></svg>`,
+  code: `<svg viewBox="0 0 20 20"><path d="m7.2 6.5-3.5 3.5 3.5 3.5M12.8 6.5l3.5 3.5-3.5 3.5M11 4.8 9 15.2"/></svg>`,
+  database: `<svg viewBox="0 0 20 20"><ellipse cx="10" cy="5.5" rx="5.8" ry="2.2"/><path d="M4.2 5.5v9c0 1.2 2.6 2.2 5.8 2.2s5.8-1 5.8-2.2v-9"/><path d="M4.2 10c0 1.2 2.6 2.2 5.8 2.2s5.8-1 5.8-2.2"/></svg>`,
+  paperclip: `<svg viewBox="0 0 20 20"><path d="m14.8 9.2-5.6 5.6a3.2 3.2 0 0 1-4.5-4.5l6.4-6.4a2.1 2.1 0 1 1 3 3l-6.4 6.4a1 1 0 0 1-1.5-1.5l5.4-5.4"/></svg>`,
+  trash: `<svg viewBox="0 0 20 20"><path d="M4.2 6h11.6M7.6 6V4.4a1 1 0 0 1 1-1h2.8a1 1 0 0 1 1 1V6M6 6l.8 10a1.2 1.2 0 0 0 1.2 1.1h4a1.2 1.2 0 0 0 1.2-1.1L14 6"/></svg>`,
 };
 
 export function escapeHtml(value) {
@@ -50,7 +59,7 @@ export function toast(message, kind = "info") {
   const root = $("#toast-root");
   if (!root) return;
   const el = document.createElement("div");
-  el.className = "toast";
+  el.className = `toast is-${kind}`;
   const icon = kind === "error" ? ICONS.info : kind === "success" ? ICONS.checkCircle : ICONS.info;
   el.innerHTML = `${icon}<span>${escapeHtml(message)}</span>`;
   root.appendChild(el);
@@ -94,7 +103,7 @@ export function closeModal() {
 export function confirmDialog({ title, body, confirm = "确认", danger = false }) {
   return new Promise((resolve) => {
     openModal(`
-      <div class="modal" role="dialog" aria-modal="true" style="width:min(420px,100%)">
+      <div class="modal modal-sm" role="dialog" aria-modal="true">
         <div class="modal-head">
           <div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(body)}</p></div>
         </div>
@@ -211,7 +220,7 @@ export async function fileToAvatarDataUrl(file) {
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#fbfaf7";
+  ctx.fillStyle = "#f8f9fb";
   ctx.fillRect(0, 0, size, size);
   const scale = Math.max(size / bitmap.width, size / bitmap.height);
   const w = bitmap.width * scale;

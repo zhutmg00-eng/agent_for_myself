@@ -1,25 +1,25 @@
-/* App shell: sidebar, routing, inspector, shortcuts. */
+/* App shell: sidebar, rail tooltips, routing, inspector, command search, shortcuts. */
 
 import {
-  state, boot, subscribe, emit, openRoom, openChief, openBot, createRoom,
-  roomLastPreview, roomTitle, profileOf, refreshRooms, refreshBots, refreshContext,
+  state, boot, subscribe, openRoom, openChief, openBot, createRoom,
+  roomLastPreview, roomTitle, profileOf,
   sortedRooms, refreshHealth, pendingApprovalCount, applyTheme,
 } from "./store.js";
-import { avatar, groupAvatar, profileFor, escapeHtml } from "./avatars.js";
+import { avatar, groupAvatar, profileFor, escapeHtml, brandMarkSvg } from "./avatars.js";
 import {
   ICONS, $, $$, toast, openModal, closeModal, formatTokens, escapeAttr, debounce,
 } from "./ui.js";
-import { ChiefView } from "./views/chief.js";
-import { GroupView, groupInspectorHTML, bindGroupInspector, openFilePreview } from "./views/group.js";
+import { ChiefView, chiefInspectorHTML } from "./views/chief.js";
+import { GroupView, groupInspectorHTML, bindGroupInspector } from "./views/group.js";
 import { BotView } from "./views/bot.js";
 import { openSettings } from "./views/settings.js";
-import { chiefInspectorHTML } from "./views/chief.js";
 import { setMentionColorizer } from "./markdown.js";
 
 let currentView = null;
 let currentKey = "";
 let inspectorKey = "";
 let inspectorSig = "";
+let railTooltipEl = null;
 
 const SIDEBAR_STORAGE_KEY = "agent_fusion:sidebar_mode";
 
@@ -64,6 +64,7 @@ function setSidebarMode(mode, persist = true) {
     els.btnToggleSidebar.setAttribute("aria-expanded", isRail ? "false" : "true");
     els.btnToggleSidebar.title = isRail ? "展开侧边栏（Ctrl+B）" : "折叠侧边栏（Ctrl+B）";
   }
+  hideRailTooltip();
   if (persist) {
     try { localStorage.setItem(SIDEBAR_STORAGE_KEY, mode); } catch (_) {}
   }
@@ -74,8 +75,42 @@ function toggleSidebar() {
   setSidebarMode(isRail ? "expanded" : "rail");
 }
 
+function showRailTooltip(target) {
+  if (!els.sidebar?.classList.contains("is-rail")) return;
+  const text = target?.getAttribute("data-tooltip") || target?.getAttribute("title");
+  if (!text) return;
+  if (!railTooltipEl) {
+    railTooltipEl = document.createElement("div");
+    railTooltipEl.className = "rail-tooltip";
+    document.body.appendChild(railTooltipEl);
+  }
+  const rect = target.getBoundingClientRect();
+  railTooltipEl.textContent = text;
+  railTooltipEl.style.left = `${rect.right + 10}px`;
+  railTooltipEl.style.top = `${rect.top + rect.height / 2}px`;
+  railTooltipEl.style.transform = "translateY(-50%)";
+  railTooltipEl.classList.add("is-visible");
+}
+
+function hideRailTooltip() {
+  if (railTooltipEl) railTooltipEl.classList.remove("is-visible");
+}
+
+function bindRailTooltips() {
+  if (!els.sidebar) return;
+  els.sidebar.addEventListener("pointerenter", (ev) => {
+    const target = ev.target.closest?.("[data-tooltip]");
+    if (target) showRailTooltip(target);
+  }, true);
+  els.sidebar.addEventListener("pointerleave", (ev) => {
+    if (ev.target.closest?.("[data-tooltip]")) hideRailTooltip();
+  }, true);
+  els.sidebar.addEventListener("scroll", hideRailTooltip, true);
+}
+
 function bindShell() {
   initSidebarMode();
+  bindRailTooltips();
   els.btnToggleSidebar?.addEventListener("click", toggleSidebar);
   els.chiefCard.addEventListener("click", () => openChief());
   $("#btn-new").addEventListener("click", openNewGroup);
@@ -124,7 +159,7 @@ function bindShell() {
 
 function renderSidebar() {
   const chief = profileFor("ChiefRouter", state.botsById.ChiefRouter);
-  els.chiefOrb.innerHTML = avatar("ChiefRouter", 46);
+  els.chiefOrb.innerHTML = avatar("ChiefRouter", 34);
   els.chiefCard.classList.toggle("is-active", state.view.type === "chief");
   els.chiefCard.querySelector(".chief-name").textContent = chief.name;
   els.chiefCard.querySelector(".chief-role").textContent = chief.role;
@@ -138,7 +173,7 @@ function renderSidebar() {
     const unread = state.unread[room.room_id] || 0;
     const sub = (room.parent_room_id ? "小群 · " : "") + (preview || `${(room.members || []).length} 位成员 · 群主 ${owner.name}`);
     return `<button class="room-row${active ? " is-active" : ""}" data-room-id="${escapeAttr(room.room_id)}" data-tooltip="${escapeAttr(roomTitle(room))}" title="${escapeAttr(roomTitle(room))}">
-      ${groupAvatar(room, 34, state.botsById)}
+      ${groupAvatar(room, 32, state.botsById)}
       <span class="room-copy"><span class="room-name">${escapeHtml(roomTitle(room))}</span><span class="room-sub">${escapeHtml(sub)}</span></span>
       ${unread ? `<span class="room-unread">${unread > 99 ? "99+" : unread}</span>` : ""}
     </button>`;
@@ -148,7 +183,11 @@ function renderSidebar() {
   els.botList.innerHTML = bots.map((bot) => {
     const p = profileFor(bot.id, bot);
     const active = state.view.type === "bot" && state.view.id === bot.id;
-    const sub = p.tagline && p.tagline.startsWith(p.role) ? p.tagline : `${p.role} · ${p.tagline}`;
+    const rawTag = String(p.tagline || "").trim();
+    const cleanedTag = p.role && rawTag.startsWith(`${p.role} · `) ? rawTag.slice(p.role.length + 3) : rawTag;
+    const sub = p.role && p.role !== p.name
+      ? (cleanedTag ? `${p.role} · ${cleanedTag}` : p.role)
+      : (cleanedTag || p.role || "");
     return `<button class="bot-row${active ? " is-active" : ""}" data-bot-id="${escapeAttr(bot.id)}" data-tooltip="${escapeAttr(p.name)} · ${escapeAttr(p.role)}" title="${escapeAttr(p.name)}">
       ${avatar(bot.id, 28)}
       <span class="bot-copy"><span class="bot-name">${escapeHtml(p.name)}</span><span class="bot-sub">${escapeHtml(sub)}</span></span>
@@ -160,7 +199,6 @@ function renderSidebar() {
   els.footUsage.textContent = formatTokens(ctx.active_tokens);
   els.footModel.textContent = modelLabel();
 
-  // 待裁决审批的入口徽标：0 条时整个元素隐藏（CSS 里也兜一层 [hidden]）。
   const pending = pendingApprovalCount();
   if (els.approvalBadge) {
     els.approvalBadge.hidden = pending <= 0;
@@ -185,8 +223,6 @@ function renderSidebar() {
   }
 }
 
-/* Footer model label — backend model ids look like "magpie/xxx" or
- * "deepseek-v4.1-flash"; show the readable tail. */
 function modelLabel() {
   const raw = state.settings?.model || state.health?.model || "";
   if (!raw) return "pi 内核";
@@ -247,7 +283,6 @@ function renderInspector(force = false) {
       selectedMember: insp.member || null,
       files: (state.files[insp.id] || []).map((f) => [f.file_id, f.path, f.description]),
       subs: state.rooms.filter((r) => r.parent_room_id === insp.id).map((r) => r.room_id),
-      // 证据阶梯汇总后到：签入 sig 才能在汇总到达后重绘检查器。
       evidence: state.evidence?.[insp.id]?.summary || null,
       evidenceMismatch: (state.evidence?.[insp.id]?.records || []).filter((r) => r.status === "mismatch").length,
     });
@@ -302,24 +337,24 @@ function openNewGroup() {
   }).join("");
 
   openModal(`
-    <div class="modal" role="dialog" aria-modal="true" style="width:min(560px,100%)">
+    <div class="modal modal-md" role="dialog" aria-modal="true">
       <div class="modal-head">
         <div><h2>新建群聊</h2><p>Boss 会自动作为群主，Librarian 负责群文件空间。</p></div>
         <span class="spacer"></span>
-        <button class="modal-close" data-close>${ICONS.close}</button>
+        <button class="modal-close" data-close aria-label="关闭">${ICONS.close}</button>
       </div>
       <div class="modal-body">
         <div class="field">
-          <label>群名称</label>
+          <label for="ng-title">群名称</label>
           <input class="input" id="ng-title" placeholder="例如：产品发布准备" maxlength="40" autofocus>
         </div>
         <div class="field">
-          <label>成员</label>
+          <label>选择协作成员</label>
           <div class="member-pick" id="ng-members">${renderPicker()}</div>
-          <div class="field-hint">群主 Boss 与文件管家 Librarian 已固定加入，不需要手动选择。</div>
+          <div class="field-hint">群主 Boss 与文件管家 Librarian 已固定加入，无需手动勾选。</div>
         </div>
         <div class="field">
-          <label>上下文共享</label>
+          <label>上下文共享策略</label>
           <div class="seg" id="ng-policy">
             <button type="button" data-policy="shared" class="is-on">共享全文</button>
             <button type="button" data-policy="summary">仅摘要</button>
@@ -354,13 +389,11 @@ function openNewGroup() {
         };
         $("#ng-policy-hint", root).textContent = hints[policy];
       });
-      $("#ng-create", root).addEventListener("click", async () => {
+      const submitCreate = async () => {
         const title = $("#ng-title", root).value.trim() || "新群聊";
         const btn = $("#ng-create", root);
         btn.disabled = true;
         try {
-          // Owner + file librarian are fixed roles; send the full roster so the
-          // backend does not have to guess the owner from members[0].
           const roster = ["boss", "librarian", ...Array.from(selected).filter((id) => id !== "boss" && id !== "librarian")];
           const roomId = await createRoom({
             members: roster,
@@ -376,45 +409,68 @@ function openNewGroup() {
           btn.disabled = false;
           toast(`创建失败：${err.message}`, "error");
         }
+      };
+      $("#ng-create", root).addEventListener("click", submitCreate);
+      $("#ng-title", root).addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && !ev.isComposing) { ev.preventDefault(); submitCreate(); }
       });
+      setTimeout(() => $("#ng-title", root)?.focus(), 30);
     },
   });
 }
 
 function openSearch() {
   openModal(`
-    <div class="modal" role="dialog" aria-modal="true" style="width:min(560px,100%);align-self:start;margin-top:12vh">
-      <div class="modal-head" style="padding-bottom:8px">
-        <div style="width:100%;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding-bottom:10px">
-          <span style="width:17px;height:17px;color:var(--text-3)">${ICONS.search}</span>
-          <input id="search-input" class="input" style="border:0;box-shadow:none;height:28px;padding:0;font-size:14px;background:transparent" placeholder="搜索群聊或成员" autofocus>
-          <button class="modal-close" data-close>${ICONS.close}</button>
-        </div>
+    <div class="modal modal-search" role="dialog" aria-modal="true">
+      <div class="search-modal-head">
+        <span class="search-modal-icon" aria-hidden="true">${ICONS.search}</span>
+        <input id="search-input" class="search-modal-input" placeholder="搜索群聊、成员或快速跳转…" autofocus>
+        <kbd class="shortcut-hint">ESC</kbd>
+        <button class="modal-close" data-close aria-label="关闭">${ICONS.close}</button>
       </div>
-      <div class="modal-body" id="search-results" style="padding-top:8px"></div>
+      <div class="modal-body search-modal-body" id="search-results"></div>
     </div>`, {
     onMount(root) {
       const input = $("#search-input", root);
       const results = $("#search-results", root);
+      let activeIdx = 0;
+
+      const highlight = () => {
+        const rows = $$(".search-item", results);
+        if (!rows.length) return;
+        activeIdx = ((activeIdx % rows.length) + rows.length) % rows.length;
+        rows.forEach((r, idx) => r.classList.toggle("is-active", idx === activeIdx));
+      };
+
       const draw = () => {
         const q = input.value.trim().toLowerCase();
         const rooms = state.rooms.filter((r) => !q || roomTitle(r).toLowerCase().includes(q));
-        const bots = state.bots.filter((b) => b.id !== "ChiefRouter" && (!q || profileFor(b.id, b).name.toLowerCase().includes(q) || b.id.toLowerCase().includes(q)));
+        const bots = state.bots.filter((b) => b.id !== "ChiefRouter" && (!q || profileFor(b.id, b).name.toLowerCase().includes(q) || b.id.toLowerCase().includes(q) || profileFor(b.id, b).role.toLowerCase().includes(q)));
+        activeIdx = 0;
         results.innerHTML = `
-          ${rooms.length ? `<div class="section-label" style="margin-top:0">群聊</div>` + rooms.map((r) => `<button class="bot-row" data-go-room="${escapeAttr(r.room_id)}">
+          ${rooms.length ? `<div class="section-label is-first">群聊</div>` + rooms.map((r) => `<button class="bot-row search-item" data-go-room="${escapeAttr(r.room_id)}">
             ${groupAvatar(r, 28, state.botsById)}<span class="bot-copy"><span class="bot-name">${escapeHtml(roomTitle(r))}</span><span class="bot-sub">${(r.members || []).length} 位成员</span></span>
           </button>`).join("") : ""}
-          ${bots.length ? `<div class="section-label">成员</div>` + bots.map((b) => {
+          ${bots.length ? `<div class="section-label${rooms.length ? "" : " is-first"}">团队成员</div>` + bots.map((b) => {
             const p = profileFor(b.id, b);
-            return `<button class="bot-row" data-go-bot="${escapeAttr(b.id)}">
+            return `<button class="bot-row search-item" data-go-bot="${escapeAttr(b.id)}">
               ${avatar(b.id, 28)}<span class="bot-copy"><span class="bot-name">${escapeHtml(p.name)}</span><span class="bot-sub">${escapeHtml(p.role)} · ${escapeHtml(p.tagline)}</span></span>
             </button>`;
           }).join("") : ""}
           ${!rooms.length && !bots.length ? `<div class="empty-mini">没有找到匹配项</div>` : ""}`;
         $$("[data-go-room]", results).forEach((el) => el.addEventListener("click", () => { closeModal(); openRoom(el.dataset.goRoom); }));
         $$("[data-go-bot]", results).forEach((el) => el.addEventListener("click", () => { closeModal(); openBot(el.dataset.goBot); }));
+        highlight();
       };
+
       input.addEventListener("input", debounce(draw, 80));
+      input.addEventListener("keydown", (ev) => {
+        const rows = $$(".search-item", results);
+        if (!rows.length) return;
+        if (ev.key === "ArrowDown") { ev.preventDefault(); activeIdx += 1; highlight(); }
+        else if (ev.key === "ArrowUp") { ev.preventDefault(); activeIdx -= 1; highlight(); }
+        else if (ev.key === "Enter") { ev.preventDefault(); rows[activeIdx]?.click(); }
+      });
       $$("[data-close]", root).forEach((b) => b.addEventListener("click", closeModal));
       draw();
       setTimeout(() => input.focus(), 30);
@@ -428,11 +484,11 @@ function renderLoading() {
   els.view.innerHTML = `
     <div class="chat-body"><div class="chat-inner is-empty">
       <div class="welcome">
-        <div class="welcome-orb">${avatar("ChiefRouter", 76)}</div>
+        <div class="welcome-brand-badge">${brandMarkSvg(34)}</div>
         <h1>AgentFusion</h1>
         <p>群聊智能体工作台 · pi 内核</p>
-        <p>${state.error ? `本地服务连接失败：${escapeHtml(state.error)}` : "正在连接本地运行时…"}</p>
-        ${state.error ? `<div style="margin-top:16px"><button class="btn" id="retry-boot">重试</button></div>` : ""}
+        <p class="welcome-status">${state.error ? `本地服务连接失败：${escapeHtml(state.error)}` : "正在连接本地运行时…"}</p>
+        ${state.error ? `<div class="welcome-actions"><button class="btn primary" id="retry-boot">重试连接</button></div>` : ""}
       </div>
     </div></div>`;
   $("#retry-boot")?.addEventListener("click", () => window.location.reload());
@@ -449,8 +505,6 @@ async function start() {
   });
   await boot();
   render();
-  // Keep the engine panel (kernel / gateway / data root) honest without
-  // hammering the server: one refresh on boot, then a slow poll.
   refreshHealth();
   setInterval(() => { if (!document.hidden) refreshHealth(); }, 30000);
 }

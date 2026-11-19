@@ -9,8 +9,8 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "start": "node src/main.js",
-    "dev": "node src/main.js --port 8720",
+    "start": "node src/main.js --port 3000 --host 0.0.0.0",
+    "dev": "node src/main.js --port 3000 --host 0.0.0.0",
     "desktop": "node scripts/start_dev.mjs",
     "test": "node --test \"tests/**/*.test.mjs\"",
     "build": "node scripts/build_portable.mjs",

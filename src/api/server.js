@@ -411,7 +411,13 @@ export async function createApp(options = {}) {
     const createEngine = pickFunction(runtimeMod, ["createEngine"]);
     if (createEngine) {
       try {
-        app.engine = await createEngine({ store: app.store, events: app.events });
+        const storedInitSettings = readStoredSettings(app);
+        app.engine = await createEngine({
+          store: app.store,
+          events: app.events,
+          gatewayUrl: storedInitSettings.gateway_url || undefined,
+          defaultModel: storedInitSettings.model || undefined,
+        });
         app.wiring.engine = "ok";
       } catch (err) {
         app.errors.engine = errorMessage(err);
@@ -563,6 +569,30 @@ export async function createApp(options = {}) {
     app.wiring.memory = "injected";
   }
 
+  /* 自动化操控引擎：Browser Use (Playwright) & Computer Use (OS Native / CUA Bridge) */
+  app.automation = options.automation || null;
+  if (!app.automation) {
+    const browserMod = await tryImportModule("../automation/browser.js", "automation_browser", app);
+    const computerMod = await tryImportModule("../automation/computer.js", "automation_computer", app);
+    const BrowserManager = browserMod?.BrowserManager || browserMod?.default;
+    const ComputerDriver = computerMod?.ComputerDriver || computerMod?.default;
+    if (typeof BrowserManager === "function" || typeof ComputerDriver === "function") {
+      try {
+        app.automation = {
+          browser: typeof BrowserManager === "function" ? new BrowserManager() : null,
+          computer: typeof ComputerDriver === "function" ? new ComputerDriver() : null,
+        };
+        app.wiring.automation = "ok";
+      } catch (err) {
+        app.errors.automation = errorMessage(err);
+        app.wiring.automation = `failed: ${errorMessage(err)}`;
+        log.warn("automation init failed:", errorMessage(err));
+      }
+    }
+  } else {
+    app.wiring.automation = "injected";
+  }
+
   /* rooms */
   app.rooms = options.rooms || null;
   if (!app.rooms) {
@@ -582,6 +612,7 @@ export async function createApp(options = {}) {
           memory: app.memory,
           telemetry: app.telemetry,
           curator: app.curator,
+          automation: app.automation,
         });
         app.wiring.rooms = "ok";
         if (typeof app.rooms.restore === "function") await app.rooms.restore();
@@ -643,6 +674,11 @@ async function disposeApp(app) {
     app.disposeChief?.();
   } catch (err) {
     log.debug("disposeChief failed:", errorMessage(err));
+  }
+  try {
+    await app.automation?.browser?.killAll?.();
+  } catch (err) {
+    log.debug("automation.browser.killAll failed:", errorMessage(err));
   }
   try {
     await app.engine?.dispose?.();
@@ -735,6 +771,7 @@ function modelCapacity(app, modelId) {
 
 function chiefConfig(app) {
   const stored = readKV(app, "chief_config", {}) || {};
+  const explicitModel = typeof stored?.model === "string" ? stored.model.trim() : "";
   const base = {
     id: CHIEF_ID,
     name: "Chief Router",
@@ -745,12 +782,16 @@ function chiefConfig(app) {
     tagline: "总调度 · 任务拓扑分解",
     state: "idle",
     model: currentModel(app),
+    model_override: explicitModel,
+    thinking_level: String(stored?.thinking_level || "off"),
     temperature: 0,
     system_prompt: "You are the Chief Router orchestrating autonomous subagents.",
     allowed_tools: app.chiefTools?.length
       ? [...app.chiefTools]
       : ["read", "write", "edit", "bash", "grep", "find", "ls"],
     read_only: true,
+    can_use_browser: false,
+    can_use_computer: false,
     max_subtasks: 8,
     max_parallel: 2,
   };
@@ -758,7 +799,11 @@ function chiefConfig(app) {
   merged.id = CHIEF_ID;
   merged.role = "router";
   merged.archetype = "router";
-  merged.model = merged.model || currentModel(app);
+  merged.model_override = explicitModel;
+  merged.model = explicitModel || currentModel(app);
+  merged.thinking_level = String(merged.thinking_level || "off");
+  merged.can_use_browser = Boolean(merged.can_use_browser);
+  merged.can_use_computer = Boolean(merged.can_use_computer);
   merged.tools = merged.allowed_tools;
   return merged;
 }
@@ -774,6 +819,12 @@ function botConfigView(app, bot) {
       ? record.tools
       : [];
   const name = String(record.name || id);
+  const rawModel = typeof record.model === "string" ? record.model.trim() : "";
+  const globalDefault = currentModel(app);
+  const overridesMap = readStoredSettings(app).archetype_model_overrides || {};
+  const trackedOverride = typeof overridesMap[id] === "string" ? overridesMap[id].trim() : "";
+  const explicitModel = trackedOverride
+    || (rawModel && rawModel !== globalDefault && rawModel !== DEFAULT_MODEL ? rawModel : "");
   return {
     ...record,
     id,
@@ -784,12 +835,16 @@ function botConfigView(app, bot) {
     badge: String(record.badge || record.emoji || "🤖"),
     tagline: String(record.tagline || ""),
     state: String(record.state || "idle"),
-    model: String(record.model || currentModel(app)),
+    model_override: explicitModel,
+    model: explicitModel || globalDefault,
+    thinking_level: String(record.thinking_level || "off"),
     temperature: toFloat(record.temperature, 0),
     system_prompt: String(record.system_prompt || record.systemPrompt || ""),
     allowed_tools: tools,
     tools,
     read_only: readOnly,
+    can_use_browser: Boolean(record.can_use_browser),
+    can_use_computer: Boolean(record.can_use_computer),
     // Hermes 式工具面（src/toolsets.js）：null 表示该 bot 仍走 allowed_tools 白名单。
     toolsets: Array.isArray(record.toolsets) ? record.toolsets : null,
     toolset_role: record.toolset_role ? String(record.toolset_role) : null,
@@ -861,22 +916,30 @@ function findBot(app, botId) {
 
 function updateChiefConfig(app, patch) {
   const current = chiefConfig(app);
-  const next = { ...current };
+  const stored = readKV(app, "chief_config", {}) || {};
+  const next = { ...current, ...stored };
   if (typeof patch.name === "string") next.name = patch.name.trim() || next.name;
   if (typeof patch.badge === "string") next.badge = patch.badge.trim().slice(0, 8) || next.badge;
   if (typeof patch.tagline === "string") next.tagline = patch.tagline.trim().slice(0, 80);
-  if (typeof patch.model === "string" && patch.model.trim()) next.model = patch.model.trim();
+  if (patch.model !== undefined) {
+    next.model = typeof patch.model === "string" ? patch.model.trim() : "";
+  }
+  if (typeof patch.thinking_level === "string" && ["off", "low", "medium", "high"].includes(patch.thinking_level)) {
+    next.thinking_level = patch.thinking_level;
+  }
   if (patch.temperature !== undefined) next.temperature = clamp(toFloat(patch.temperature, 0), 0, 2);
   if (typeof patch.system_prompt === "string") next.system_prompt = patch.system_prompt.trim();
   if (patch.max_subtasks !== undefined) next.max_subtasks = Math.max(1, toInt(patch.max_subtasks, next.max_subtasks));
   if (patch.max_parallel !== undefined) next.max_parallel = Math.max(1, toInt(patch.max_parallel, next.max_parallel));
+  if (patch.can_use_browser !== undefined) next.can_use_browser = Boolean(patch.can_use_browser);
+  if (patch.can_use_computer !== undefined) next.can_use_computer = Boolean(patch.can_use_computer);
   if (Array.isArray(patch.allowed_tools)) next.allowed_tools = patch.allowed_tools.map(String);
   next.tools = next.allowed_tools;
   next.id = CHIEF_ID;
   next.role = "router";
   next.archetype = "router";
   writeKV(app, "chief_config", next);
-  return next;
+  return chiefConfig(app);
 }
 
 function updateStoredBot(app, botId, patch) {
@@ -886,7 +949,18 @@ function updateStoredBot(app, botId, patch) {
   if (typeof patch.name === "string") next.name = patch.name.trim() || next.name;
   if (typeof patch.badge === "string") next.badge = patch.badge.trim().slice(0, 8);
   if (typeof patch.tagline === "string") next.tagline = patch.tagline.trim().slice(0, 80);
-  if (typeof patch.model === "string" && patch.model.trim()) next.model = patch.model.trim();
+  if (patch.model !== undefined) {
+    const clean = typeof patch.model === "string" ? patch.model.trim() : "";
+    next.model = clean;
+    const storedSettings = readStoredSettings(app);
+    const overrides = { ...(storedSettings.archetype_model_overrides || {}) };
+    if (clean) overrides[String(botId)] = clean;
+    else delete overrides[String(botId)];
+    writeKV(app, "settings", { ...storedSettings, archetype_model_overrides: overrides });
+  }
+  if (typeof patch.thinking_level === "string" && ["off", "low", "medium", "high"].includes(patch.thinking_level)) {
+    next.thinking_level = patch.thinking_level;
+  }
   if (patch.temperature !== undefined) next.temperature = clamp(toFloat(patch.temperature, 0), 0, 2);
   if (typeof patch.system_prompt === "string") next.system_prompt = patch.system_prompt.trim();
   if (patch.max_iterations !== undefined) next.max_iterations = Math.max(1, toInt(patch.max_iterations, 30));
@@ -905,6 +979,8 @@ function updateStoredBot(app, botId, patch) {
   if (Array.isArray(patch.disabled_toolsets)) next.disabled_toolsets = patch.disabled_toolsets.map(String).filter(Boolean);
   if (typeof patch.toolset_role === "string" && patch.toolset_role.trim()) next.toolset_role = patch.toolset_role.trim();
   if (typeof patch.label === "string" && patch.label.trim()) next.label = patch.label.trim();
+  if (patch.can_use_browser !== undefined) next.can_use_browser = Boolean(patch.can_use_browser);
+  if (patch.can_use_computer !== undefined) next.can_use_computer = Boolean(patch.can_use_computer);
   try {
     app.store?.upsertBot?.(next);
   } catch (err) {
@@ -1940,9 +2016,11 @@ function handleSse(app, req, res, url) {
 
 function normalizeMemberPermissions(app, room, patch) {
   const next = {};
-  for (const key of ["can_speak", "context_access", "can_create_subgroup", "allowed_tool_overrides"]) {
+  for (const key of ["can_speak", "context_access", "can_create_subgroup", "can_use_browser", "can_use_computer", "allowed_tool_overrides"]) {
     if (patch[key] !== undefined) next[key] = patch[key];
   }
+  if (next.can_use_browser !== undefined) next.can_use_browser = Boolean(next.can_use_browser);
+  if (next.can_use_computer !== undefined) next.can_use_computer = Boolean(next.can_use_computer);
   if (next.context_access !== undefined && !["full", "summary", "none"].includes(next.context_access)) {
     delete next.context_access;
   }
@@ -2341,6 +2419,8 @@ const ROUTES = {
   skillProposalReview: /^\/api\/skills\/proposals\/([^/]+)\/review$/,
   skillProposalAdopt: /^\/api\/skills\/proposals\/([^/]+)\/adopt$/,
   memoryEntry: /^\/api\/memory\/([^/]+)$/,
+  // 自动化操控产物（Browser Use / Computer Use 截图）
+  automationArtifact: /^\/api\/automation\/artifacts\/([^/]+)$/,
 };
 
 function badPathId(decoded) {
@@ -2399,12 +2479,23 @@ async function handleApi(app, req, res, url) {
     return sendJson(res, 200, settingsView(app));
   }
   if (pathname === "/api/settings" && method === "PUT") {
+    const prev = settingsView(app);
     const body = await readJson(req);
     let updated;
     try {
       updated = updateSettings(app, body);
     } catch (err) {
       return sendJson(res, statusForError(err, 500), { error: errorMessage(err) });
+    }
+    try {
+      if (body.gateway_url && updated.gateway_url !== prev.gateway_url) {
+        await app.engine?.reloadModels?.({ url: updated.gateway_url });
+      }
+      if (body.model && updated.model !== prev.model) {
+        await app.engine?.setDefaultModel?.(updated.model);
+      }
+    } catch (err) {
+      log.warn("settings runtime sync failed:", errorMessage(err));
     }
     try {
       await app.events?.publish?.({ topic: "harness.settings.updated", sender: "server", payload: updated });
@@ -2415,13 +2506,29 @@ async function handleApi(app, req, res, url) {
   }
 
   /* E06 models */
-  if (method === "GET" && pathname === "/api/models") {
+  if (
+    (method === "GET" && pathname === "/api/models")
+    || (method === "POST" && pathname === "/api/models/refresh")
+  ) {
+    const wantRefresh = method === "POST"
+      || url.searchParams.get("refresh") === "1"
+      || url.searchParams.get("refresh") === "true";
+    if (wantRefresh && typeof app.engine?.reloadModels === "function") {
+      try {
+        await app.engine.reloadModels({ url: settingsView(app).gateway_url });
+      } catch (err) {
+        log.warn("models refresh failed:", errorMessage(err));
+      }
+    }
     const catalog = modelCatalog(app);
+    const gwStatus = app.engine?.gatewayStatus || {};
     return sendJson(res, 200, {
       object: "list",
       data: catalog.models,
       current_model: currentModel(app),
-      gateway_url: app.engine?.gatewayStatus?.url || GATEWAY_URL,
+      gateway_url: gwStatus.url || settingsView(app).gateway_url || GATEWAY_URL,
+      gateway_ok: Boolean(gwStatus.ok),
+      gateway_error: gwStatus.error || "",
       is_fallback: catalog.isFallback,
     });
   }
@@ -2454,10 +2561,33 @@ async function handleApi(app, req, res, url) {
           if (!updated) {
             // archetype-only bot: only `model` has an effect
             updated = { ...existing };
-            if (typeof body.model === "string" && body.model.trim()) updated.model = body.model.trim();
-            const overrides = { ...(readStoredSettings(app).archetype_model_overrides || {}) };
-            overrides[updated.archetype || botId] = updated.model;
-            writeKV(app, "settings", { ...readStoredSettings(app), archetype_model_overrides: overrides });
+            if (body.model !== undefined) {
+              const clean = typeof body.model === "string" ? body.model.trim() : "";
+              updated.model_override = clean;
+              updated.model = clean || currentModel(app);
+              const overrides = { ...(readStoredSettings(app).archetype_model_overrides || {}) };
+              if (clean) overrides[updated.archetype || botId] = clean;
+              else delete overrides[updated.archetype || botId];
+              writeKV(app, "settings", { ...readStoredSettings(app), archetype_model_overrides: overrides });
+            }
+          }
+        }
+        if (body.model !== undefined && updated?.model) {
+          try {
+            await app.engine?.ensureModel?.(updated.model);
+            await app.rooms?.syncBotModel?.(botId, updated.model);
+          } catch (err) {
+            log.warn("bot model runtime sync failed:", botId, errorMessage(err));
+          }
+        }
+        if (body.can_use_browser !== undefined || body.can_use_computer !== undefined) {
+          try {
+            await app.rooms?.syncBotCapabilities?.(botId, {
+              ...(body.can_use_browser !== undefined ? { can_use_browser: Boolean(body.can_use_browser) } : {}),
+              ...(body.can_use_computer !== undefined ? { can_use_computer: Boolean(body.can_use_computer) } : {}),
+            });
+          } catch (err) {
+            log.warn("bot capability runtime sync failed:", botId, errorMessage(err));
           }
         }
         try {
@@ -2527,6 +2657,73 @@ async function handleApi(app, req, res, url) {
       return sendJson(res, 500, { error: errorMessage(err) });
     }
     return sendJson(res, 200, hooksView(app));
+  }
+
+  /* ---------------------------------------------------------------- Automation (Browser & Computer Use) */
+  if (method === "GET" && pathname === "/api/automation/status") {
+    const refresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
+    const browser = app.automation?.browser
+      ? await app.automation.browser.detect(refresh)
+      : { available: false, driver: "playwright-cli", reason: "Browser Use 模块未初始化", activeSessions: 0, emergencyStopped: false };
+    const computer = app.automation?.computer
+      ? await app.automation.computer.detect(refresh)
+      : { available: false, platform: process.platform, driver: "none", reason: "Computer Use 模块未初始化", emergencyStopped: false };
+    return sendJson(res, 200, {
+      browser,
+      computer,
+      emergency_stopped: Boolean(browser.emergencyStopped || computer.emergencyStopped),
+    });
+  }
+  if (method === "POST" && pathname === "/api/automation/kill") {
+    const body = await readJson(req).catch(() => ({}));
+    const stopped = body.stopped === undefined ? true : Boolean(body.stopped);
+    let closedSessions = 0;
+    if (stopped) {
+      const killRes = await app.automation?.browser?.killAll?.().catch(() => null);
+      closedSessions = Number(killRes?.closedSessions || 0);
+      app.automation?.computer?.setEmergencyStop?.(true);
+    } else {
+      app.automation?.browser?.setEmergencyStop?.(false);
+      app.automation?.computer?.setEmergencyStop?.(false);
+    }
+    const browser = app.automation?.browser
+      ? await app.automation.browser.detect(false)
+      : { available: false, activeSessions: 0, emergencyStopped: stopped };
+    const computer = app.automation?.computer
+      ? await app.automation.computer.detect(false)
+      : { available: false, emergencyStopped: stopped };
+    const payload = {
+      browser,
+      computer,
+      emergency_stopped: stopped,
+      closed_sessions: closedSessions,
+    };
+    try {
+      await app.events?.publish?.({ topic: "harness.automation.updated", sender: "server", payload });
+    } catch {
+      /* best effort */
+    }
+    return sendJson(res, 200, payload);
+  }
+  const artifactMatch = pathname.match(ROUTES.automationArtifact);
+  if (artifactMatch && method === "GET") {
+    const rawName = safeDecode(artifactMatch[1]);
+    const safeName = path.basename(rawName);
+    if (!safeName || safeName !== rawName || !/^[a-zA-Z0-9._-]+\.png$/i.test(safeName)) {
+      return notFound(res, "artifact not found");
+    }
+    const dir = app.automation?.browser?.getArtifactsDir?.()
+      || app.automation?.computer?.getArtifactsDir?.()
+      || path.join(DIRS.dataRoot, "automation", "artifacts");
+    const abs = path.resolve(dir, safeName);
+    if (!abs.startsWith(path.resolve(dir) + path.sep)) return notFound(res, "artifact not found");
+    let data;
+    try {
+      data = fs.readFileSync(abs);
+    } catch {
+      return notFound(res, "artifact not found");
+    }
+    return sendBuffer(res, 200, data, { contentType: "image/png", cacheControl: "public, max-age=3600" });
   }
 
   /* ---------------------------------------------------------------- Hermes 吸收层 */

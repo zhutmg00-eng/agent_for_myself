@@ -6,6 +6,7 @@ import {
   ICONS, $, $$, toast, formatTokens, scrollToBottom, isNearBottom,
 } from "../ui.js";
 import { renderMarkdown } from "../markdown.js";
+import { formatModelShort } from "../models.js";
 
 const SUGGESTIONS = [
   { icon: "layers", title: "规划并执行一个多步任务", body: "Chief 先拆解，再调度合适的 Worker。", prompt: "帮我完成一个多步任务：先分析需求并拆解，再分派给合适的成员执行，最后汇总结果。任务：" },
@@ -91,6 +92,8 @@ export class ChiefView {
   update(force = false) {
     this.renderHead();
     this.renderBody();
+    const modelEl = $(".composer-model", this.root);
+    if (modelEl) modelEl.textContent = modelShort();
     this.el.send.disabled = !this.el.input.value.trim() || state.chief.active;
     if ((force || !this.userScrolled) && this.el.scroll) {
       requestAnimationFrame(() => scrollToBottom(this.el.scroll));
@@ -272,11 +275,9 @@ export class ChiefView {
 }
 
 function modelShort() {
-  const raw = state.settings?.model || state.health?.model || "";
+  const raw = state.botsById.ChiefRouter?.model || state.settings?.model || state.health?.model || "";
   if (!raw) return "pi 内核 · 本地运行";
-  return String(raw)
-    .replace(/^(auto|magpie|workbuddy|openai|anthropic)\//i, "")
-    .replace(/^deepseek-/, "DeepSeek ");
+  return formatModelShort(raw, state.models);
 }
 
 export function chiefInspectorHTML() {

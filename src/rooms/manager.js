@@ -36,7 +36,7 @@ export class RoomManager {
    *          archetypes?:object, approval?:object, memory?:object, telemetry?:object,
    *          curator?:object}} deps
    */
-  constructor({ store, events, engine, hooks, skills, archetypes, approval = null, memory = null, telemetry = null, curator = null } = {}) {
+  constructor({ store, events, engine, hooks, skills, archetypes, approval = null, memory = null, telemetry = null, curator = null, automation = null } = {}) {
     this.store = store;
     this.events = events;
     this.engine = engine;
@@ -51,6 +51,8 @@ export class RoomManager {
     this.telemetry = telemetry;
     /** 技能策展（src/skills/curator.js）。 */
     this.curator = curator;
+    /** 浏览器与桌面操控引擎（src/automation/*）。 */
+    this.automation = automation;
     /** @type {Map<string, Room>} */
     this.rooms = new Map();
   }
@@ -78,6 +80,7 @@ export class RoomManager {
           approval: this.approval,
           memory: this.memory,
           telemetry: this.telemetry,
+          automation: this.automation,
           manager: this,
         });
         await room.loadMembers();
@@ -156,6 +159,7 @@ export class RoomManager {
       approval: this.approval,
       memory: this.memory,
       telemetry: this.telemetry,
+      automation: this.automation,
       manager: this,
     });
     room.members = [...members];
@@ -163,10 +167,13 @@ export class RoomManager {
     room.relay_limit = 3 * Math.max(1, members.length);
     room.member_permissions = {};
     for (const id of members) {
+      const bot = this.ensureBot(id);
       const custom = input.member_permissions?.[id] || {};
       const isOwner = effectiveOwner === id;
       room.member_permissions[id] = defaultPermissions({
         can_create_subgroup: isOwner ? true : false,
+        can_use_browser: Boolean(bot?.can_use_browser),
+        can_use_computer: Boolean(bot?.can_use_computer),
         ...custom,
       });
     }
@@ -268,6 +275,45 @@ export class RoomManager {
       log.warn("delete room failed", err?.message || err);
     }
     return this.rooms.delete(String(id));
+  }
+
+  /** Hot-swap a member's active model across all live room sessions. */
+  async syncBotModel(botId, modelId) {
+    const id = String(botId || "").trim();
+    if (!id) return 0;
+    let updated = 0;
+    for (const room of this.rooms.values()) {
+      const runner = room?._runners?.get?.(id);
+      if (!runner) continue;
+      try {
+        await runner.setModel?.(modelId);
+        updated += 1;
+      } catch (err) {
+        log.warn("syncBotModel failed", room.room_id, id, err?.message || err);
+      }
+    }
+    return updated;
+  }
+
+  /** Sync manual Browser Use / Computer Use grants from bot profile across live rooms. */
+  async syncBotCapabilities(botId, patch = {}) {
+    const id = String(botId || "").trim();
+    if (!id) return 0;
+    const permPatch = {};
+    if (patch.can_use_browser !== undefined) permPatch.can_use_browser = Boolean(patch.can_use_browser);
+    if (patch.can_use_computer !== undefined) permPatch.can_use_computer = Boolean(patch.can_use_computer);
+    if (!Object.keys(permPatch).length) return 0;
+    let updated = 0;
+    for (const room of this.rooms.values()) {
+      if (!room?.members?.includes?.(id)) continue;
+      try {
+        await room.grantPermission?.(id, permPatch);
+        updated += 1;
+      } catch (err) {
+        log.warn("syncBotCapabilities failed", room.room_id, id, err?.message || err);
+      }
+    }
+    return updated;
   }
 
   dispose() {

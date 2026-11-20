@@ -91,8 +91,14 @@ export function normalizeModels(payload) {
         ...m,
         id,
         display_name: m.display_name || m.displayName || m.label || id,
+        family: m.family || "",
+        family_label: m.family_label || "",
         owned_by: m.owned_by || m.owner || "",
-        context_length: m.context_length || m.contextLength || null,
+        context_length: m.context_length || m.contextLength || m.contextWindow || null,
+        max_output_tokens: m.max_output_tokens || m.maxTokens || null,
+        reasoning: m.reasoning,
+        input: Array.isArray(m.input) ? m.input : (Array.isArray(m.modalities?.input) ? m.modalities.input : undefined),
+        tool_call: m.tool_call,
       };
     })
     .filter(Boolean);
@@ -176,8 +182,9 @@ export const api = {
   updateSettings: (payload) => request("/api/settings", { method: "PUT", body: payload }),
 
   /* models — normalised array under .data, plus raw metadata kept alongside */
-  models: async () => {
-    const raw = await request("/api/models", { timeout: 8000 });
+  models: async ({ refresh = false } = {}) => {
+    const qs = refresh ? "?refresh=1" : "";
+    const raw = await request(`/api/models${qs}`, { timeout: 10000 });
     const data = normalizeModels(raw);
     return {
       object: "list",
@@ -185,6 +192,8 @@ export const api = {
       models: data,
       current_model: (raw && raw.current_model) || "",
       gateway_url: (raw && raw.gateway_url) || "",
+      gateway_ok: Boolean(raw && raw.gateway_ok),
+      gateway_error: (raw && raw.gateway_error) || "",
       is_fallback: Boolean(raw && raw.is_fallback),
       raw,
     };
@@ -223,6 +232,11 @@ export const api = {
   threads: () => request("/api/threads"),
   threadEvents: (threadId, afterSeq = 0, limit = 2000) =>
     request(`/api/thread/${encodeURIComponent(threadId)}/events?after_seq=${afterSeq}&limit=${limit}`),
+
+  automationStatus: ({ refresh = false } = {}) =>
+    request(`/api/automation/status${refresh ? "?refresh=1" : ""}`, { timeout: 8000 }),
+  setAutomationKill: (stopped = true) =>
+    request("/api/automation/kill", { method: "POST", body: { stopped: Boolean(stopped) }, timeout: 8000 }),
 };
 
 /* --------------------------------------------------------------- approvals */

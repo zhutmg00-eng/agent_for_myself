@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { avatar, roleIconSvg, brandMarkSvg, profileFor } from "../web/js/avatars.js";
+import { roomSkeletonHTML } from "../web/js/ui.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -60,5 +61,28 @@ describe("Zero-Emoji Frontend & Geometric SVG Iconography", () => {
     const mark = brandMarkSvg(28);
     assert.match(mark, /<svg\b/i);
     assert.equal(EMOJI_RX.test(mark), false);
+  });
+
+  it("renders staggered room-list skeleton loader rows with reduced-motion CSS support", () => {
+    const html = roomSkeletonHTML(4);
+    const rows = html.match(/class="room-skeleton-row"/g) || [];
+    assert.equal(rows.length, 4);
+    assert.match(html, /--skel-i:0/);
+    assert.match(html, /--skel-i:3/);
+    assert.match(html, /aria-hidden="true"/);
+    assert.match(html, /class="skel-block skel-avatar"/);
+    assert.match(html, /class="skel-block skel-line is-title"/);
+    assert.match(html, /class="skel-block skel-line is-sub"/);
+    assert.equal(EMOJI_RX.test(html), false);
+
+    const clamped = roomSkeletonHTML(99);
+    assert.equal((clamped.match(/class="room-skeleton-row"/g) || []).length, 8);
+
+    const css = fs.readFileSync(path.join(ROOT, "web", "app.css"), "utf8");
+    assert.match(css, /\.room-skeleton-row\s*\{/);
+    assert.match(css, /@keyframes\s+skel-shimmer/);
+    assert.match(css, /@keyframes\s+room-enter/);
+    assert.match(css, /\.sidebar\.is-rail\s+\.room-skeleton-row/);
+    assert.match(css, /prefers-reduced-motion:\s*reduce/);
   });
 });

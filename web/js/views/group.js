@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import {
   state, subscribe, openRoom, sendRoomMessage, refreshFiles, updateRoomMeta,
   activeMembers, roomTitle, childRooms, profileOf, uploadAvatar, resetAvatar,
-  memberIdentity, refreshEvidence, evidenceSummaryOf,
+  memberIdentity, refreshEvidence, evidenceSummaryOf, updateBotModel, refreshModels,
 } from "../store.js";
 import { avatar, groupAvatar, userAvatar, profileFor, escapeHtml, customAvatarUrl, roleIconSvg } from "../avatars.js";
 import {
@@ -12,6 +12,9 @@ import {
   scrollToBottom, isNearBottom, escapeAttr, pickAvatarFile, fileToAvatarDataUrl,
 } from "../ui.js";
 import { renderMarkdown } from "../markdown.js";
+import {
+  formatModelShort, buildModelSelectOptionsHTML, promptCustomModel, CUSTOM_MODEL_VALUE,
+} from "../models.js";
 
 const POLICY_LABEL = { shared: "共享全文", summary: "仅摘要", isolated: "各自独立" };
 const POLICY_HINT = {
@@ -99,6 +102,12 @@ export function toolIconSVG(name = "") {
   if (n === "grep" || n === "find" || n === "ls") {
     return `<span class="tool-icon is-search">${ICONS.search}</span>`;
   }
+  if (n.startsWith("browser_")) {
+    return `<span class="tool-icon is-browser">${ICONS.globe}</span>`;
+  }
+  if (n.startsWith("computer_")) {
+    return `<span class="tool-icon is-computer">${ICONS.monitor}</span>`;
+  }
   if (n.includes("search") || n.includes("web") || n.includes("fetch") || n.includes("http")) {
     return `<svg viewBox="0 0 20 20" class="tool-icon is-search"><circle cx="10" cy="10" r="6.7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 10h13M10 3.3c1.8 2 2.7 4.2 2.7 6.7s-.9 4.7-2.7 6.7c-1.8-2-2.7-4.2-2.7-6.7s.9-4.7 2.7-6.7" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>`;
   }
@@ -165,6 +174,8 @@ export function toolCardHTML(tool, options = {}) {
     : (isRunning || isError);
   const durationText = formatDuration(tool.duration || tool.durationMs || tool.ms);
   const outInfo = formatToolOutput(tool.output || tool.summary || tool.content || tool.result);
+  const artifactMatch = outInfo.rawText.match(/\/api\/automation\/artifacts\/[a-zA-Z0-9._-]+\.png/i);
+  const artifactUrl = artifactMatch ? artifactMatch[0] : "";
   const toolId = tool.id || `tc_${Math.random().toString(36).slice(2, 8)}`;
 
   return `
@@ -192,6 +203,10 @@ export function toolCardHTML(tool, options = {}) {
           </div>
           <div class="tool-params-wrap">${formatToolParams(tool.params || tool.args)}</div>
         </div>
+        ${artifactUrl ? `
+        <div class="tool-screenshot-preview">
+          <img src="${escapeAttr(artifactUrl)}" alt="${escapeAttr(`${toolName} 实时截图`)}" loading="lazy">
+        </div>` : ""}
         ${(tool.output || tool.summary || tool.content || tool.result) ? `
         <div class="tool-section tool-output">
           <div class="tool-section-head">
@@ -715,13 +730,18 @@ export class GroupView {
     const isInfoOn = state.inspector?.type === "group" && state.inspector?.id === this.roomId;
 
     // Header memoization: prevent mid-flight DOM destruction during async evidence fetch or clicks
-    const headSig = `${this.roomId}:${room.title || ""}:${room.topic || ""}:${room.context_policy || ""}:${room.owner_id || ""}:${members.join(",")}:${fileCount}`;
+    const memberModelsSig = members.map((id) => {
+      const mp = room.member_permissions?.[id] || {};
+      return `${id}@${state.botsById[id]?.model_override || state.botsById[id]?.model || ""}:${mp.can_use_browser ? 1 : 0}${mp.can_use_computer ? 1 : 0}`;
+    }).join(",");
+    const headSig = `${this.roomId}:${room.title || ""}:${room.topic || ""}:${room.context_policy || ""}:${room.owner_id || ""}:${memberModelsSig}:${fileCount}`;
     if (this._headDataSig === headSig && this.el.head.firstElementChild) {
       this.syncHeadActiveState(room);
       return;
     }
     this._headDataSig = headSig;
 
+    const defaultModel = state.settings?.model || state.health?.model || "";
     this.el.head.className = "view-head has-roster capsule-header";
     this.el.head.innerHTML = `
       <div class="capsule-left">
@@ -736,12 +756,22 @@ export class GroupView {
           <div class="member-chips" id="g-roster">
             ${members.map((id) => {
               const idn = memberIdentity(id);
+              const bot = state.botsById[id];
+              const mp = room.member_permissions?.[id] || {};
               const isOwner = id === room.owner_id;
               const isSelected = Boolean(activeMember && activeMember === id);
-              return `<button class="mchip${isOwner ? " is-owner" : ""}${isSelected ? " is-selected" : ""}" type="button" data-goto-member="${escapeAttr(id)}" aria-pressed="${isSelected ? "true" : "false"}" title="${escapeAttr(`${idn.name} · ${idn.role} · ${idn.tagline}`)}">
-                <span class="mchip-ico" aria-hidden="true">${roleIconSvg(id, state.botsById[id])}</span>
+              const overrideId = String(bot?.model_override || "").trim();
+              const effectiveModel = overrideId || bot?.model || defaultModel;
+              const shortModel = formatModelShort(effectiveModel, state.models);
+              const capLabels = [mp.can_use_browser ? "Browser Use" : "", mp.can_use_computer ? "Computer Use" : ""].filter(Boolean);
+              const tip = `${idn.name} · ${idn.role} · 模型 ${shortModel}${overrideId ? "（独立）" : "（默认）"}${capLabels.length ? ` · 已授权 ${capLabels.join(" + ")}` : ""}`;
+              return `<button class="mchip${isOwner ? " is-owner" : ""}${isSelected ? " is-selected" : ""}${overrideId ? " has-custom-model" : ""}" type="button" data-goto-member="${escapeAttr(id)}" aria-pressed="${isSelected ? "true" : "false"}" title="${escapeAttr(tip)}">
+                <span class="mchip-ico" aria-hidden="true">${roleIconSvg(id, bot)}</span>
                 <span class="mchip-name">${escapeHtml(idn.name)}</span>
                 <span class="mchip-badge">${isOwner ? "群主" : escapeHtml(idn.badge || idn.role)}</span>
+                ${overrideId ? `<span class="mchip-model">${escapeHtml(shortModel)}</span>` : ""}
+                ${mp.can_use_browser ? `<span class="mchip-cap is-browser" title="已手动授予 Browser Use 权限" aria-hidden="true">${ICONS.globe}</span>` : ""}
+                ${mp.can_use_computer ? `<span class="mchip-cap is-computer" title="已手动授予 Computer Use 权限" aria-hidden="true">${ICONS.monitor}</span>` : ""}
               </button>`;
             }).join("")}
           </div>
@@ -960,7 +990,8 @@ export class GroupView {
 
     const isError = /^Tool failure/i.test(item.content || "");
     const p = profileOf(item.speaker);
-    const modelTag = `<span class="msg-model">${escapeHtml(modelShort())}</span>`;
+    const speakerModel = item.model || state.botsById[item.speaker]?.model || state.settings?.model || state.health?.model || "";
+    const modelTag = `<span class="msg-model" title="${escapeAttr(speakerModel)}">${escapeHtml(formatModelShort(speakerModel, state.models))}</span>`;
     const toolsHTML = tools && tools.length ? toolsClusterHTML(tools) : "";
     const telem = item.telemetry || (item.tps || item.ttft_ms ? item : null);
     const telemetryPill = telem?.tps || telem?.ttft_ms
@@ -1227,9 +1258,7 @@ export class GroupView {
 function modelShort() {
   const raw = state.settings?.model || state.health?.model || "";
   if (!raw) return "pi 内核 · 本地运行";
-  return String(raw)
-    .replace(/^(auto|magpie|workbuddy|openai|anthropic)\//i, "")
-    .replace(/^deepseek-/, "DeepSeek ");
+  return formatModelShort(raw, state.models);
 }
 
 async function loadRoomQuiet(roomId) {
@@ -1306,18 +1335,34 @@ function membersTabHTML(room, members, activeMember = null) {
     summary: "只看到压缩摘要 + 近段",
     none: "只收到本轮任务与系统通知",
   };
+  const defaultModel = state.settings?.model || state.health?.model || "";
+  const catalog = state.models || [];
   return `
     <div class="section-label">上下文共享 <span class="count">${escapeHtml(POLICY_LABEL[room.context_policy] || "")}</span></div>
     <div class="seg" data-policy>
       ${["shared", "summary", "isolated"].map((p) => `<button data-policy-val="${p}" class="${room.context_policy === p ? "is-on" : ""}">${POLICY_LABEL[p]}</button>`).join("")}
     </div>
     <div class="seg-hint">${POLICY_HINT[room.context_policy] || ""} 群主可随时调整；成员的「上下文」权限优先于房间策略。</div>
-    <div class="section-label">成员 <span class="count">${members.length}</span></div>
+    <div class="section-label is-flex">
+      <span>成员 <span class="count">${members.length}</span></span>
+      <button class="mini-refresh-btn" type="button" data-refresh-models title="从网关刷新全部可用模型">${ICONS.refresh}<span>刷新模型</span></button>
+    </div>
     ${members.map((id) => {
       const idn = memberIdentity(id);
+      const bot = state.botsById[id] || {};
       const perm = room.member_permissions?.[id] || { can_speak: true, context_access: "full", can_create_subgroup: false };
       const isOwner = id === room.owner_id;
       const isSelected = Boolean(activeMember && activeMember === id);
+      const overrideModel = String(bot.model_override || "").trim();
+      const effectiveModel = overrideModel || bot.model || defaultModel;
+      const modelOptions = buildModelSelectOptionsHTML(catalog, {
+        selected: overrideModel,
+        defaultModel,
+        allowInherit: true,
+        allowCustom: true,
+        compact: true,
+        extraIds: effectiveModel ? [effectiveModel] : [],
+      });
       const rawTag = String(idn.tagline || "").trim();
       const cleanedTag = idn.role && rawTag.startsWith(`${idn.role} · `) ? rawTag.slice(idn.role.length + 3) : rawTag;
       const roleLine = isOwner
@@ -1326,17 +1371,31 @@ function membersTabHTML(room, members, activeMember = null) {
             ? (cleanedTag ? `${idn.role} · ${cleanedTag}` : idn.role)
             : (cleanedTag || idn.role || ""));
       return `<div class="member-row${isSelected ? " is-selected" : ""}" data-member="${escapeAttr(id)}">
-        ${avatar(id, 32)}
-        <div class="member-copy">
-          <div class="member-name">${escapeHtml(idn.name)}${isOwner ? `<span class="owner-star" title="群主 · 可发言/分派/授权" aria-label="群主">${ICONS.crown}</span>` : ""}
-            ${idn.badge && !isOwner ? `<span class="tag is-xs">${escapeHtml(idn.badge)}</span>` : ""}
+        <div class="member-row-top">
+          ${avatar(id, 32)}
+          <div class="member-copy">
+            <div class="member-name">${escapeHtml(idn.name)}${isOwner ? `<span class="owner-star" title="群主 · 可发言/分派/授权" aria-label="群主">${ICONS.crown}</span>` : ""}
+              ${idn.badge && !isOwner ? `<span class="tag is-xs">${escapeHtml(idn.badge)}</span>` : ""}
+            </div>
+            <div class="member-role">${escapeHtml(roleLine)}</div>
           </div>
-          <div class="member-role">${escapeHtml(roleLine)}</div>
+          <div class="member-tools">
+            <button class="mini-toggle${perm.can_speak ? " is-on" : ""}" data-act="speak" title="${perm.can_speak ? "正在发言队列中（点击静音）" : "已静音（点击允许发言）"}">${perm.can_speak ? ICONS.sound : ICONS.mute}</button>
+            <button class="mini-toggle text${perm.context_access === "full" ? " is-on" : ""}" data-act="context" title="上下文权限：${CONTEXT_LABEL[perm.context_access] || perm.context_access} · ${CONTEXT_HINT[perm.context_access] || ""}">${CONTEXT_LABEL[perm.context_access] || "全文"}</button>
+            <button class="mini-toggle${perm.can_create_subgroup ? " is-on" : ""}" data-act="subgroup" title="${perm.can_create_subgroup ? "可以拉小群" : "不允许拉小群"}">${ICONS.usersPlus}</button>
+          </div>
         </div>
-        <div class="member-tools">
-          <button class="mini-toggle${perm.can_speak ? " is-on" : ""}" data-act="speak" title="${perm.can_speak ? "正在发言队列中（点击静音）" : "已静音（点击允许发言）"}">${perm.can_speak ? ICONS.sound : ICONS.mute}</button>
-          <button class="mini-toggle text${perm.context_access === "full" ? " is-on" : ""}" data-act="context" title="上下文权限：${CONTEXT_LABEL[perm.context_access] || perm.context_access} · ${CONTEXT_HINT[perm.context_access] || ""}">${CONTEXT_LABEL[perm.context_access] || "全文"}</button>
-          <button class="mini-toggle${perm.can_create_subgroup ? " is-on" : ""}" data-act="subgroup" title="${perm.can_create_subgroup ? "可以拉小群" : "不允许拉小群"}">${ICONS.usersPlus}</button>
+        <div class="member-model-bar">
+          <span class="member-model-badge${overrideModel ? " is-custom" : ""}">${overrideModel ? "独立模型" : "默认模型"}</span>
+          <select class="member-model-select" data-member-model="${escapeAttr(id)}" aria-label="${escapeAttr(`${idn.name} 的推理模型`)}" title="${escapeAttr(`当前模型：${effectiveModel || "默认"}`)}">${modelOptions}</select>
+        </div>
+        <div class="member-cap-bar">
+          <button class="cap-grant-btn is-compact${perm.can_use_browser ? " is-granted" : ""}" type="button" data-act="browser" aria-pressed="${perm.can_use_browser ? "true" : "false"}" title="${perm.can_use_browser ? "已手动授予 Browser Use 权限（点击收回）" : "默认关闭：点击手动授予 Browser Use 浏览器操控权限"}">
+            ${ICONS.globe}<span>Browser Use</span><em class="cap-grant-state">${perm.can_use_browser ? "已授权" : "授予"}</em>
+          </button>
+          <button class="cap-grant-btn is-compact is-computer${perm.can_use_computer ? " is-granted" : ""}" type="button" data-act="computer" aria-pressed="${perm.can_use_computer ? "true" : "false"}" title="${perm.can_use_computer ? "已手动授予 Computer Use 权限（点击收回）" : "默认关闭：点击手动授予 Computer Use 桌面操控权限"}">
+            ${ICONS.monitor}<span>Computer Use</span><em class="cap-grant-state">${perm.can_use_computer ? "已授权" : "授予"}</em>
+          </button>
         </div>
       </div>`;
     }).join("")}
@@ -1447,8 +1506,60 @@ export function bindGroupInspector(root, roomId, tab = "members", rerender, sele
       } catch (err) { toast(err.message, "error"); }
     });
   });
+  $("[data-refresh-models]", root)?.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await refreshModels({ refresh: true });
+      const count = (res?.models || state.models || []).length;
+      toast(res?.gateway_ok === false ? `网关离线，使用本地 ${count} 个缓存模型` : `已刷新网关模型目录（${count} 个）`, "success");
+      rerender();
+    } catch (err) {
+      toast(`刷新模型失败：${err.message}`, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
   $$("[data-member]", root).forEach((row) => {
     const memberId = row.dataset.member;
+    const modelSel = $("[data-member-model]", row);
+    if (modelSel) {
+      modelSel.addEventListener("click", (ev) => ev.stopPropagation());
+      modelSel.addEventListener("change", async (ev) => {
+        ev.stopPropagation();
+        const prevOverride = String(state.botsById[memberId]?.model_override || "").trim();
+        let nextVal = modelSel.value;
+        if (nextVal === CUSTOM_MODEL_VALUE) {
+          const p = profileOf(memberId);
+          const entered = await promptCustomModel({
+            title: `为 ${p.name} 指定模型`,
+            current: prevOverride || state.botsById[memberId]?.model || "",
+          });
+          if (!entered) {
+            modelSel.value = prevOverride;
+            return;
+          }
+          nextVal = entered;
+        }
+        modelSel.disabled = true;
+        try {
+          await updateBotModel(memberId, nextVal);
+          const p = profileOf(memberId);
+          toast(
+            nextVal
+              ? `${p.name} 已切换至 ${formatModelShort(nextVal, state.models)}`
+              : `${p.name} 已恢复跟随全局默认模型`,
+            "success",
+          );
+          rerender();
+        } catch (err) {
+          toast(`模型切换失败：${err.message}`, "error");
+          modelSel.value = prevOverride;
+          modelSel.disabled = false;
+        }
+      });
+    }
     $$("[data-act]", row).forEach((btn) => {
       let inFlight = false;
       btn.addEventListener("click", async (ev) => {
@@ -1467,6 +1578,8 @@ export function bindGroupInspector(root, roomId, tab = "members", rerender, sele
         const memberPerm = currentPerms[memberId] || { can_speak: true, context_access: "full", can_create_subgroup: false };
 
         const patch = {};
+        let capToastMsg = "";
+        let capToastKind = "success";
         if (btn.dataset.act === "speak") {
           patch.can_speak = !Boolean(memberPerm.can_speak);
         }
@@ -1476,6 +1589,18 @@ export function bindGroupInspector(root, roomId, tab = "members", rerender, sele
         if (btn.dataset.act === "context") {
           const curr = memberPerm.context_access || "full";
           patch.context_access = curr === "full" ? "summary" : curr === "summary" ? "none" : "full";
+        }
+        if (btn.dataset.act === "browser") {
+          patch.can_use_browser = !Boolean(memberPerm.can_use_browser);
+          const mName = profileOf(memberId).name;
+          capToastMsg = patch.can_use_browser ? `已手动授予 ${mName} Browser Use 权限` : `已收回 ${mName} 的 Browser Use 权限`;
+          capToastKind = patch.can_use_browser ? "success" : "info";
+        }
+        if (btn.dataset.act === "computer") {
+          patch.can_use_computer = !Boolean(memberPerm.can_use_computer);
+          const mName = profileOf(memberId).name;
+          capToastMsg = patch.can_use_computer ? `已手动授予 ${mName} Computer Use 权限` : `已收回 ${mName} 的 Computer Use 权限`;
+          capToastKind = patch.can_use_computer ? "success" : "info";
         }
 
         const prevMemberPerm = { ...memberPerm };
@@ -1491,6 +1616,7 @@ export function bindGroupInspector(root, roomId, tab = "members", rerender, sele
               [memberId]: { ...(updatedRoom.member_permissions?.[memberId] || {}), ...patch },
             };
           }
+          if (capToastMsg) toast(capToastMsg, capToastKind);
           rerender();
         } catch (err) {
           const rollBackRoom = state.roomById[roomId];

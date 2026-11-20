@@ -78,6 +78,9 @@ const WRITE_TOOL_RE = new RegExp(`^(?:${WRITE_TOOLS})$`, "i");
 const MOVE_TOOL_RE = /^(?:move|rename|copy|mkdir|create_directory|touch|room_file_move)$/i;
 const DELETE_TOOL_RE = /^(?:delete|delete_file|remove|remove_file|rm|rmdir|unlink|trash)$/i;
 const READONLY_TOOL_RE = /^(?:read|read_file|readfile|view|glob|list|list_dir|ls|stat|grep|search|search_files|find|head|tail)$/i;
+const BROWSER_READONLY_TOOL_RE = /^(?:browser_snapshot|browser_screenshot|browser_close)$/i;
+const COMPUTER_READONLY_TOOL_RE = /^(?:computer_list_windows|computer_screenshot|computer_wait)$/i;
+const COMPUTER_CONTROL_TOOL_RE = /^(?:computer_focus_window|computer_click|computer_drag|computer_type|computer_hotkey|computer_scroll)$/i;
 const NETWORK_TOOL_RE = /^(?:web_fetch|webfetch|fetch|http|http_request|web_search|curl|wget|browser_\w+)$/i;
 const ROOM_READONLY_TOOL_RE = /^(?:room_list_members|room_file_list|room_file_read|skill_list)$/;
 const ROOM_PRIVILEGED_TOOL_RE = /^(?:room_grant_permission|room_revoke_permission)$/;
@@ -312,6 +315,15 @@ function classify(toolName, input) {
     if (SHELL_DEV_SAFE_RE.test(lower)) return { kind: "read", readOnly: true, passive: false, why: "构建/测试命令" };
     if (SHELL_READONLY_RE.test(lower)) return { kind: "read", readOnly: true, passive: false, why: "只读命令" };
     return { kind: "exec", readOnly: false, passive: false, why: "执行命令" };
+  }
+  if (BROWSER_READONLY_TOOL_RE.test(toolName)) {
+    return { kind: "read", readOnly: true, passive: false, why: "浏览器只读观察 / 清理会话" };
+  }
+  if (COMPUTER_READONLY_TOOL_RE.test(toolName)) {
+    return { kind: "read", readOnly: true, passive: false, why: "桌面只读观察（截屏 / 窗口列表）" };
+  }
+  if (COMPUTER_CONTROL_TOOL_RE.test(toolName)) {
+    return { kind: "computer_control", readOnly: false, passive: false, smartAllow: false, why: "桌面键鼠操控（Computer Use）" };
   }
   if (NETWORK_TOOL_RE.test(toolName)) return { kind: "network", readOnly: false, passive: false, why: "网络访问" };
   if (DELETE_TOOL_RE.test(toolName)) return { kind: "delete", readOnly: false, passive: false, why: "删除操作" };

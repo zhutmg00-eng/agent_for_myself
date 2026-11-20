@@ -7,19 +7,21 @@ import {
 } from "./store.js";
 import { avatar, groupAvatar, profileFor, escapeHtml, brandMarkSvg } from "./avatars.js";
 import {
-  ICONS, $, $$, toast, openModal, closeModal, formatTokens, escapeAttr, debounce,
+  ICONS, $, $$, toast, openModal, closeModal, formatTokens, escapeAttr, debounce, roomSkeletonHTML,
 } from "./ui.js";
 import { ChiefView, chiefInspectorHTML } from "./views/chief.js";
 import { GroupView, groupInspectorHTML, bindGroupInspector } from "./views/group.js";
 import { BotView } from "./views/bot.js";
 import { openSettings } from "./views/settings.js";
 import { setMentionColorizer } from "./markdown.js";
+import { formatModelShort } from "./models.js";
 
 let currentView = null;
 let currentKey = "";
 let inspectorKey = "";
 let inspectorSig = "";
 let railTooltipEl = null;
+let roomsWereSkeleton = false;
 
 const SIDEBAR_STORAGE_KEY = "agent_fusion:sidebar_mode";
 
@@ -157,6 +159,42 @@ function bindShell() {
   }
 }
 
+function renderRoomList() {
+  if (!els.roomList) return;
+  const rooms = sortedRooms();
+  const isLoading = Boolean(state.roomsLoading) && rooms.length === 0;
+  if (isLoading) {
+    els.roomList.setAttribute("aria-busy", "true");
+    els.roomList.classList.add("is-loading");
+    if (els.roomEmpty) els.roomEmpty.style.display = "none";
+    if (!roomsWereSkeleton || !els.roomList.querySelector(".room-skeleton-row")) {
+      els.roomList.innerHTML = roomSkeletonHTML(4);
+    }
+    roomsWereSkeleton = true;
+    return;
+  }
+
+  const animateIn = roomsWereSkeleton;
+  roomsWereSkeleton = false;
+  els.roomList.removeAttribute("aria-busy");
+  els.roomList.classList.remove("is-loading");
+  if (els.roomEmpty) els.roomEmpty.style.display = rooms.length ? "none" : "block";
+  els.roomList.innerHTML = rooms.map((room, idx) => {
+    const active = state.view.type === "group" && state.view.id === room.room_id;
+    const preview = roomLastPreview(room.room_id);
+    const owner = profileOf(room.owner_id);
+    const unread = state.unread[room.room_id] || 0;
+    const sub = (room.parent_room_id ? "小群 · " : "") + (preview || `${(room.members || []).length} 位成员 · 群主 ${owner.name}`);
+    const enterCls = animateIn ? " is-entering" : "";
+    const enterStyle = animateIn ? ` style="--row-i:${Math.min(idx, 6)}"` : "";
+    return `<button class="room-row${active ? " is-active" : ""}${enterCls}"${enterStyle} data-room-id="${escapeAttr(room.room_id)}" data-tooltip="${escapeAttr(roomTitle(room))}" title="${escapeAttr(roomTitle(room))}">
+      ${groupAvatar(room, 32, state.botsById)}
+      <span class="room-copy"><span class="room-name">${escapeHtml(roomTitle(room))}</span><span class="room-sub">${escapeHtml(sub)}</span></span>
+      ${unread ? `<span class="room-unread">${unread > 99 ? "99+" : unread}</span>` : ""}
+    </button>`;
+  }).join("");
+}
+
 function renderSidebar() {
   const chief = profileFor("ChiefRouter", state.botsById.ChiefRouter);
   els.chiefOrb.innerHTML = avatar("ChiefRouter", 34);
@@ -164,20 +202,7 @@ function renderSidebar() {
   els.chiefCard.querySelector(".chief-name").textContent = chief.name;
   els.chiefCard.querySelector(".chief-role").textContent = chief.role;
 
-  const rooms = sortedRooms();
-  els.roomEmpty.style.display = rooms.length ? "none" : "block";
-  els.roomList.innerHTML = rooms.map((room) => {
-    const active = state.view.type === "group" && state.view.id === room.room_id;
-    const preview = roomLastPreview(room.room_id);
-    const owner = profileOf(room.owner_id);
-    const unread = state.unread[room.room_id] || 0;
-    const sub = (room.parent_room_id ? "小群 · " : "") + (preview || `${(room.members || []).length} 位成员 · 群主 ${owner.name}`);
-    return `<button class="room-row${active ? " is-active" : ""}" data-room-id="${escapeAttr(room.room_id)}" data-tooltip="${escapeAttr(roomTitle(room))}" title="${escapeAttr(roomTitle(room))}">
-      ${groupAvatar(room, 32, state.botsById)}
-      <span class="room-copy"><span class="room-name">${escapeHtml(roomTitle(room))}</span><span class="room-sub">${escapeHtml(sub)}</span></span>
-      ${unread ? `<span class="room-unread">${unread > 99 ? "99+" : unread}</span>` : ""}
-    </button>`;
-  }).join("");
+  renderRoomList();
 
   const bots = state.bots.filter((b) => b.id !== "ChiefRouter");
   els.botList.innerHTML = bots.map((bot) => {
@@ -226,9 +251,7 @@ function renderSidebar() {
 function modelLabel() {
   const raw = state.settings?.model || state.health?.model || "";
   if (!raw) return "pi 内核";
-  return String(raw)
-    .replace(/^(auto|magpie|workbuddy|openai|anthropic)\//i, "")
-    .replace(/^deepseek-/, "DeepSeek ");
+  return formatModelShort(raw, state.models);
 }
 
 function renderTitle() {
@@ -281,6 +304,9 @@ function renderInspector(force = false) {
       policy: room.context_policy,
       perms: room.member_permissions,
       selectedMember: insp.member || null,
+      defaultModel: state.settings?.model || state.health?.model || "",
+      modelsSig: (state.models || []).map((m) => m.id).join(","),
+      botModels: (room.members || []).map((id) => `${id}:${state.botsById[id]?.model_override || ""}:${state.botsById[id]?.model || ""}`),
       files: (state.files[insp.id] || []).map((f) => [f.file_id, f.path, f.description]),
       subs: state.rooms.filter((r) => r.parent_room_id === insp.id).map((r) => r.room_id),
       evidence: state.evidence?.[insp.id]?.summary || null,
@@ -481,6 +507,7 @@ function openSearch() {
 /* ---------------------------------------------------------------- start */
 
 function renderLoading() {
+  renderRoomList();
   els.view.innerHTML = `
     <div class="chat-body"><div class="chat-inner is-empty">
       <div class="welcome">

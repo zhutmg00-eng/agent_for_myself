@@ -695,6 +695,23 @@ export class BotRunner {
     return this;
   }
 
+  /**
+   * Drop the live pi session (without marking the runner disposed) so the next
+   * turn recreates it with newly granted/revoked custom tool definitions.
+   */
+  resetSession() {
+    if (!this.session) return false;
+    try {
+      this.session.dispose?.();
+    } catch (err) {
+      log.warn("resetSession dispose failed", err?.message || err);
+    }
+    this.session = null;
+    this.loader = null;
+    this._unsubscribe = null;
+    return true;
+  }
+
   /** Switch model without losing the transcript when a session already exists. */
   async setModel(modelId) {
     this.bot.model = modelId;

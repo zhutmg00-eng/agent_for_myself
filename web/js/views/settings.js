@@ -2,14 +2,18 @@
 
 import { api } from "../api.js";
 import {
-  state, updateSettings, refreshBots, reloadHooks, refreshContext, applyTheme,
+  state, updateSettings, refreshBots, refreshRooms, reloadHooks, refreshContext, applyTheme,
   uploadAvatar, resetAvatar, refreshHealth, refreshModels, refreshApprovals, pendingApprovalCount,
   refreshSkillProposals, reviewSkillProposal, adoptSkillProposal,
+  refreshAutomation, setAutomationKill,
 } from "../store.js";
 import { avatar, userAvatar, profileFor, escapeHtml, brandMarkSvg } from "../avatars.js";
 import {
   ICONS, $, $$, toast, formatTokens, escapeAttr, pickAvatarFile, fileToAvatarDataUrl, relTime, formatTime, debounce,
 } from "../ui.js";
+import {
+  groupModels, formatModelShort, buildModelSelectOptionsHTML, promptCustomModel, CUSTOM_MODEL_VALUE,
+} from "../models.js";
 
 export const NAV = [
   { id: "general", label: "通用", icon: ICONS.settings },
@@ -49,6 +53,7 @@ const PROPOSAL_FILTERS = [
 ];
 
 let escHandler = null;
+let modelFilterQuery = "";
 let memoryViewState = { loaded: false, loading: false, query: "", entries: [], stats: null, results: null, error: "" };
 
 export function openSettings(opts = {}) {
@@ -74,7 +79,12 @@ export function openSettings(opts = {}) {
     backdrop.style.animation = "fade-in .12s reverse";
     setTimeout(() => backdrop.remove(), 120);
   };
-  escHandler = (ev) => { if (ev.key === "Escape") close(); };
+  escHandler = (ev) => {
+    if (ev.key === "Escape") {
+      if (document.querySelector(".modal-backdrop:not(.settings-backdrop)")) return;
+      close();
+    }
+  };
   document.addEventListener("keydown", escHandler);
   backdrop.addEventListener("mousedown", (ev) => { if (ev.target === backdrop) close(); });
 
@@ -164,6 +174,46 @@ function contentFor(tab, selectedBot, ctx) {
   return aboutTab();
 }
 
+function renderModelCatalogHTML(models, currentModel, filterQuery = "") {
+  const q = String(filterQuery || "").trim().toLowerCase();
+  const botExtras = (state.bots || []).map((b) => b.model_override).filter(Boolean);
+  const groups = groupModels(models, [currentModel, ...botExtras].filter(Boolean));
+  const filteredGroups = groups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((m) => !q || `${m.id} ${m.displayName} ${m.familyLabel} ${m.ownedBy}`.toLowerCase().includes(q)),
+    }))
+    .filter((g) => g.items.length > 0);
+
+  if (!filteredGroups.length) {
+    return `<div class="empty-mini">${q ? "没有匹配筛选条件的模型。" : "还没有模型目录（网关不可用时会用本地缓存）。"}</div>`;
+  }
+
+  return filteredGroups.map((g) => `
+    <div class="model-group">
+      <div class="model-group-head">
+        <span class="model-group-name">${escapeHtml(g.label)}</span>
+        <span class="model-group-count">${g.items.length}</span>
+      </div>
+      ${g.items.map((m) => {
+        const isCurrent = m.id === currentModel;
+        return `<div class="model-row${isCurrent ? " is-default" : ""}">
+          <div class="model-row-copy">
+            <span class="model-display">${escapeHtml(m.displayName)}</span>
+            ${m.displayName !== m.id ? `<span class="model-id">${escapeHtml(m.id)}</span>` : ""}
+          </div>
+          <span class="spacer"></span>
+          ${m.reasoning ? `<span class="tag">推理</span>` : ""}
+          ${m.hasVision ? `<span class="tag">视觉</span>` : ""}
+          ${m.contextLength ? `<span class="tag">${formatTokens(m.contextLength)} ctx</span>` : ""}
+          ${isCurrent
+            ? `<span class="tag accent">全局默认</span>`
+            : `<button class="btn xs ghost" type="button" data-set-default-model="${escapeAttr(m.id)}">设为默认</button>`}
+        </div>`;
+      }).join("")}
+    </div>`).join("");
+}
+
 function engineSection() {
   const s = state.settings || {};
   const h = state.health || {};
@@ -175,6 +225,7 @@ function engineSection() {
   const dataRoot = s.data_root || h.data_root || "";
   const workspace = s.workspace_root || h.workspace_root || "";
   const models = state.models || [];
+  const currentModel = s.model || h.model || "";
   const statusText = gatewayOk === null
     ? "未探测（点击刷新）"
     : gatewayOk
@@ -187,7 +238,7 @@ function engineSection() {
         <div class="set-card">
           <div class="engine-grid">
             <div class="engine-kv"><div class="k">内核</div><div class="v is-text">${escapeHtml(kernelLabel)}</div></div>
-            <div class="engine-kv"><div class="k">会话模型</div><div class="v is-text">pi AgentSession · 每成员一个</div></div>
+            <div class="engine-kv"><div class="k">会话模型</div><div class="v is-text">pi AgentSession · 每成员独立</div></div>
             <div class="engine-kv"><div class="k">网关状态</div><div class="v is-text"><span class="engine-dot ${dotClass}"></span>${escapeHtml(statusText)}</div></div>
             <div class="engine-kv"><div class="k">网关地址</div><div class="v" title="${escapeAttr(gatewayUrl)}">${escapeHtml(gatewayUrl || "未配置")}</div></div>
             <div class="engine-kv"><div class="k">数据目录</div><div class="v" title="${escapeAttr(dataRoot)}">${escapeHtml(dataRoot || "未配置")}</div></div>
@@ -196,17 +247,73 @@ function engineSection() {
             <div class="engine-kv"><div class="k">服务版本</div><div class="v is-text">${escapeHtml(h.version || s.version || "-")}</div></div>
           </div>
           <div class="set-row" style="border-top:1px solid var(--line)">
-            <div class="set-copy"><div class="set-name">模型目录</div><div class="set-desc">来自 /api/models；网关不可用时回退本地 models.json</div></div>
-            <button class="btn sm" id="engine-refresh">${ICONS.refresh} 刷新引擎信息</button>
+            <div class="set-copy"><div class="set-name">模型目录 <span class="tag is-xs">${models.length}</span></div><div class="set-desc">自动识别网关内全厂商模型（Claude / GPT / Gemini / DeepSeek / Qwen 等），可按群成员分别指定</div></div>
+            <button class="btn sm" id="engine-refresh" type="button">${ICONS.refresh} 重新探测模型</button>
           </div>
-          <div class="model-list" style="padding:2px 12px 10px">
-            ${models.map((m) => `<div class="model-row">
-              <span class="model-id">${escapeHtml(m.id)}</span>
-              <span class="spacer"></span>
-              ${m.context_length ? `<span class="tag">${formatTokens(m.context_length)} ctx</span>` : ""}
-              ${m.owned_by ? `<span class="tag">${escapeHtml(m.owned_by)}</span>` : ""}
-              ${m.id === (s.model || h.model) ? `<span class="tag accent">当前</span>` : ""}
-            </div>`).join("") || `<div class="empty-mini">还没有模型目录（网关不可用时会用本地缓存）。</div>`}
+          <div class="model-filter-row">
+            <input class="input" id="model-filter-input" value="${escapeAttr(modelFilterQuery)}" placeholder="按模型名称或厂商筛选（如 claude、gpt、gemini、qwen、deepseek）…" spellcheck="false">
+          </div>
+          <div class="model-list" id="engine-model-list">
+            ${renderModelCatalogHTML(models, currentModel, modelFilterQuery)}
+          </div>
+        </div>
+      </div>`;
+}
+
+function automationSection() {
+  const auto = state.automation || {};
+  const br = auto.browser || {};
+  const cp = auto.computer || {};
+  const stopped = Boolean(auto.emergency_stopped);
+  const brOk = br.available === true;
+  const cpOk = cp.available === true;
+  const brLabel = br.available === undefined
+    ? "未探测"
+    : brOk
+      ? `可用 · ${br.driver || "playwright-cli"}`
+      : `不可用 · ${br.reason || "未检测到 Playwright"}`;
+  const cpLabel = cp.available === undefined
+    ? "未探测"
+    : cpOk
+      ? `可用 · ${cp.driver || cp.platform || "desktop"}`
+      : `待命 · ${cp.reason || "当前为无头环境（桌面端或配置 CUA 桥接后可用）"}`;
+  const activeSessions = Number(br.activeSessions ?? (Array.isArray(br.active_sessions) ? br.active_sessions.length : 0)) || 0;
+
+  return `
+      <div class="settings-section">
+        <h3>自动化操控引擎（Browser Use &amp; Computer Use）</h3>
+        <div class="set-card">
+          <div class="auto-status-grid">
+            <div class="auto-engine-card">
+              <div class="auto-engine-head">
+                <span class="auto-engine-ico is-browser">${ICONS.globe}</span>
+                <span class="auto-engine-title">Browser Use</span>
+                <span class="tag is-xs ${brOk ? "green" : ""}">${brOk ? "就绪" : "未就绪"}</span>
+              </div>
+              <div class="auto-engine-desc">${escapeHtml(brLabel)}</div>
+              <div class="auto-engine-meta">活跃浏览器会话：${activeSessions} 个 · 按房间成员隔离</div>
+            </div>
+            <div class="auto-engine-card">
+              <div class="auto-engine-head">
+                <span class="auto-engine-ico is-computer">${ICONS.monitor}</span>
+                <span class="auto-engine-title">Computer Use</span>
+                <span class="tag is-xs ${cpOk ? "green" : "amber"}">${cpOk ? "就绪" : "桌面可用"}</span>
+              </div>
+              <div class="auto-engine-desc">${escapeHtml(cpLabel)}</div>
+              <div class="auto-engine-meta">平台：${escapeHtml(cp.platform || "linux")} · 支持 Windows / macOS / X11 / 远程桥接</div>
+            </div>
+          </div>
+          <div class="set-row auto-kill-row${stopped ? " is-stopped" : ""}">
+            <div class="set-copy">
+              <div class="set-name">安全策略与紧急急停 ${stopped ? `<span class="tag is-xs red">已紧急中止</span>` : `<span class="tag is-xs green">正常待命</span>`}</div>
+              <div class="set-desc">两项操控能力默认全部关闭，仅在你于「群信息 → 成员」或「机器人」页手动点击授权后生效；点击急停会立刻阻断所有浏览器与桌面操控并关闭会话</div>
+            </div>
+            <div class="auto-kill-actions">
+              <button class="btn sm" id="auto-refresh-btn" type="button">${ICONS.refresh} 刷新探测</button>
+              <button class="btn sm ${stopped ? "primary" : "danger"}" id="auto-kill-btn" type="button" data-stopped="${stopped ? "1" : "0"}">
+                ${ICONS.shieldAlert} ${stopped ? "恢复操控" : "紧急中止"}
+              </button>
+            </div>
           </div>
         </div>
       </div>`;
@@ -215,21 +322,28 @@ function engineSection() {
 function generalTab() {
   const s = state.settings || {};
   const models = state.models || [];
-  const current = s.model || "";
-  const opts = models.map((m) => `<option value="${escapeAttr(m.id)}" ${m.id === current ? "selected" : ""}>${escapeHtml(m.display_name || m.id)} · ${escapeHtml(m.owned_by || "")}</option>`).join("");
+  const current = s.model || state.health?.model || "";
+  const opts = buildModelSelectOptionsHTML(models, {
+    selected: current,
+    defaultModel: current,
+    allowInherit: false,
+    allowCustom: true,
+    extraIds: current ? [current] : [],
+  });
   return `
-    ${header("通用", "pi 内核、模型与界面")}
+    ${header("通用", "pi 内核、模型、自动化引擎与界面")}
     <div class="settings-body">
       ${engineSection()}
+      ${automationSection()}
       <div class="settings-section">
         <h3>模型与服务</h3>
         <div class="set-card">
           <div class="set-row">
-            <div class="set-copy"><div class="set-name">默认模型</div><div class="set-desc">所有成员与 Chief 共用；可在机器人页单独覆盖</div></div>
-            <select class="select" id="set-model">${opts || `<option>${escapeHtml(current)}</option>`}</select>
+            <div class="set-copy"><div class="set-name">全局默认模型</div><div class="set-desc">未单独指定模型的成员将默认使用此模型；可在「群信息 → 成员」或「机器人」页独立覆盖</div></div>
+            <select class="select" id="set-model">${opts || `<option value="${escapeAttr(current)}">${escapeHtml(current)}</option>`}</select>
           </div>
           <div class="set-row">
-            <div class="set-copy"><div class="set-name">Magpie 网关</div><div class="set-desc">本机模型服务地址，修改后立即生效</div></div>
+            <div class="set-copy"><div class="set-name">模型网关地址</div><div class="set-desc">兼容 OpenAI / Magpie / LiteLLM / Ollama 的 /models 与对话端点，保存后自动重扫模型目录</div></div>
             <input class="input" id="set-gateway" value="${escapeAttr(s.gateway_url || "http://127.0.0.1:3425/v1")}" spellcheck="false">
           </div>
           <div class="set-row">
@@ -623,17 +737,32 @@ function botsTab(selectedBot, ctx) {
   const bot = bots.find((b) => b.id === selectedBot) || bots[0] || { id: "ChiefRouter" };
   const p = profileFor(bot.id, bot);
   const models = state.models || [];
-  const modelOpts = models.map((m) => `<option value="${escapeAttr(m.id)}" ${m.id === bot.model ? "selected" : ""}>${escapeHtml(m.display_name || m.id)}</option>`).join("");
+  const defaultModel = state.settings?.model || state.health?.model || "";
+  const overrideModel = String(bot.model_override || "").trim();
+  const effectiveModel = overrideModel || bot.model || defaultModel;
+  const modelOpts = buildModelSelectOptionsHTML(models, {
+    selected: overrideModel,
+    defaultModel,
+    allowInherit: true,
+    allowCustom: true,
+    extraIds: effectiveModel ? [effectiveModel] : [],
+  });
   return `
-    ${header("机器人", "身份、模型与工具权限")}
+    ${header("机器人", "按成员身份独立分配模型、思考强度与提示词")}
     <div class="settings-body">
       <div class="bot-layout">
         <div class="bot-side">
           ${bots.map((b) => {
             const bp = profileFor(b.id, b);
+            const bOverride = String(b.model_override || "").trim();
+            const bModel = formatModelShort(bOverride || b.model || defaultModel, models);
             return `<button class="bot-side-row${b.id === bot.id ? " is-on" : ""}" data-bot-id="${escapeAttr(b.id)}">
               ${avatar(b.id, 28)}
-              <span class="bot-side-copy"><span class="bot-name">${escapeHtml(bp.name)}</span><span class="bot-sub">${escapeHtml(bp.role)}</span></span>
+              <span class="bot-side-copy">
+                <span class="bot-name">${escapeHtml(bp.name)}</span>
+                <span class="bot-sub">${escapeHtml(bp.role)}</span>
+                <span class="bot-side-model${bOverride ? " is-override" : ""}" title="${escapeAttr(bOverride || b.model || defaultModel)}">${escapeHtml(bModel)}</span>
+              </span>
             </button>`;
           }).join("")}
         </div>
@@ -651,8 +780,27 @@ function botsTab(selectedBot, ctx) {
           </div>
           <div class="field"><label>显示名称</label><input class="input" id="b-name" value="${escapeAttr(p.name)}"></div>
           <div class="field"><label>身份签名</label><input class="input" id="b-tagline" value="${escapeAttr(p.tagline)}" placeholder="用一句话说明它负责什么"></div>
-          <div class="field"><label>模型</label><select class="select" id="b-model">${modelOpts || `<option>${escapeHtml(bot.model || "")}</option>`}</select></div>
+          <div class="field">
+            <label>专属模型 <span class="tag is-xs ${overrideModel ? "accent" : ""}">${overrideModel ? "独立指定" : "跟随全局默认"}</span></label>
+            <div class="bot-model-field-row">
+              <select class="select" id="b-model">${modelOpts}</select>
+              <button class="btn sm" id="b-refresh-models" type="button" title="重新从网关探测模型">${ICONS.refresh} 刷新模型</button>
+            </div>
+            <div class="field-hint">选择「跟随全局默认」可随通用设置统一切换；也可任选网关内模型或输入自定义模型 ID，保存后立即热更新活跃群聊。</div>
+          </div>
           <div class="field"><label>思考强度</label><select class="select" id="b-thinking">${["off", "low", "medium", "high"].map((lv) => `<option value="${lv}"${(bot.thinking_level || "off") === lv ? " selected" : ""}>${({ off: "关闭（最快）", low: "低", medium: "中", high: "高（最稳）" })[lv]}</option>`).join("")}</select></div>
+          <div class="field">
+            <label>操控能力授权（默认关闭，需手动授予）</label>
+            <div class="bot-cap-actions">
+              <button class="cap-grant-btn${bot.can_use_browser ? " is-granted" : ""}" id="b-browser-toggle" type="button" data-cap-val="${bot.can_use_browser ? "1" : "0"}" aria-pressed="${bot.can_use_browser ? "true" : "false"}">
+                ${ICONS.globe}<span>Browser Use</span><em class="cap-grant-state">${bot.can_use_browser ? "已授权" : "授予"}</em>
+              </button>
+              <button class="cap-grant-btn is-computer${bot.can_use_computer ? " is-granted" : ""}" id="b-computer-toggle" type="button" data-cap-val="${bot.can_use_computer ? "1" : "0"}" aria-pressed="${bot.can_use_computer ? "true" : "false"}">
+                ${ICONS.monitor}<span>Computer Use</span><em class="cap-grant-state">${bot.can_use_computer ? "已授权" : "授予"}</em>
+              </button>
+            </div>
+            <div class="field-hint">保存后会同步更新该成员的默认授权与当前活跃群聊；成员和群主均无法通过提示词自行开启此权限。</div>
+          </div>
           <div class="field"><label>系统提示词</label><textarea class="textarea" id="b-prompt" rows="5">${escapeHtml(bot.system_prompt || "")}</textarea></div>
           <div class="field"><label>已挂载工具</label><div style="display:flex;flex-wrap:wrap;gap:5px">${(bot.allowed_tools || []).map((t) => `<span class="tag" style="height:22px;font-family:var(--mono);font-size:10.5px">${escapeHtml(t)}</span>`).join("") || `<span class="set-desc">无</span>`}</div></div>
           <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
@@ -715,18 +863,124 @@ function bindContent(root, ctx) {
         $$("[data-theme-val]", root).forEach((b) => b.classList.toggle("is-on", b === btn));
       });
     });
-    $("#engine-refresh", root)?.addEventListener("click", async () => {
-      await Promise.allSettled([refreshHealth(), refreshModels()]);
-      toast("引擎信息已刷新", "success");
-      ctx.rerender();
+    const bindSetDefaultButtons = () => {
+      $$("[data-set-default-model]", root).forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const targetModel = btn.dataset.setDefaultModel;
+          if (!targetModel) return;
+          btn.disabled = true;
+          try {
+            await updateSettings({ model: targetModel });
+            await refreshBots();
+            toast(`全局默认模型已切换为 ${formatModelShort(targetModel, state.models)}`, "success");
+            ctx.rerender();
+          } catch (err) {
+            btn.disabled = false;
+            toast(`切换失败：${err.message}`, "error");
+          }
+        });
+      });
+    };
+    bindSetDefaultButtons();
+
+    const filterInput = $("#model-filter-input", root);
+    if (filterInput) {
+      filterInput.addEventListener("input", () => {
+        modelFilterQuery = filterInput.value;
+        const listEl = $("#engine-model-list", root);
+        if (listEl) {
+          listEl.innerHTML = renderModelCatalogHTML(
+            state.models || [],
+            state.settings?.model || state.health?.model || "",
+            modelFilterQuery,
+          );
+          bindSetDefaultButtons();
+        }
+      });
+    }
+
+    const setModelEl = $("#set-model", root);
+    if (setModelEl) {
+      let prevDefault = setModelEl.value;
+      setModelEl.addEventListener("change", async () => {
+        if (setModelEl.value !== CUSTOM_MODEL_VALUE) {
+          prevDefault = setModelEl.value;
+          return;
+        }
+        const entered = await promptCustomModel({ title: "指定全局默认模型 ID", current: prevDefault });
+        if (!entered) {
+          setModelEl.value = prevDefault;
+          return;
+        }
+        const opt = document.createElement("option");
+        opt.value = entered;
+        opt.textContent = `${formatModelShort(entered, state.models)} (${entered}) [自定义]`;
+        setModelEl.insertBefore(opt, setModelEl.lastElementChild);
+        setModelEl.value = entered;
+        prevDefault = entered;
+      });
+    }
+
+    $("#engine-refresh", root)?.addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const [, res] = await Promise.allSettled([refreshHealth(), refreshModels({ refresh: true })]);
+        const payload = res.status === "fulfilled" ? res.value : null;
+        const count = (payload?.models || state.models || []).length;
+        toast(payload?.gateway_ok === false ? `网关离线，使用本地 ${count} 个缓存模型` : `已探测到 ${count} 个可用模型`, "success");
+        ctx.rerender();
+      } catch (err) {
+        toast(`刷新失败：${err.message}`, "error");
+        btn.disabled = false;
+      }
     });
+
+    $("#auto-refresh-btn", root)?.addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        await refreshAutomation({ refresh: true });
+        toast("已重新探测 Browser Use 与 Computer Use 状态", "success");
+        ctx.rerender();
+      } catch (err) {
+        toast(`探测失败：${err.message}`, "error");
+        btn.disabled = false;
+      }
+    });
+
+    $("#auto-kill-btn", root)?.addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      const isStopped = btn.dataset.stopped === "1";
+      btn.disabled = true;
+      try {
+        await setAutomationKill(!isStopped);
+        toast(!isStopped ? "已触发紧急中止：所有浏览器与桌面操控已阻断" : "已恢复自动化操控引擎", !isStopped ? "info" : "success");
+        ctx.rerender();
+      } catch (err) {
+        toast(`操作失败：${err.message}`, "error");
+        btn.disabled = false;
+      }
+    });
+
     $("#set-save", root)?.addEventListener("click", async () => {
       const model = $("#set-model", root)?.value;
       const gateway_url = $("#set-gateway", root)?.value?.trim();
+      const prevGateway = state.settings?.gateway_url || "";
       try {
-        await updateSettings({ ...(model ? { model } : {}), ...(gateway_url ? { gateway_url } : {}) });
-        toast("设置已保存", "success");
+        await updateSettings({
+          ...(model && model !== CUSTOM_MODEL_VALUE ? { model } : {}),
+          ...(gateway_url ? { gateway_url } : {}),
+        });
+        if (gateway_url && gateway_url !== prevGateway) {
+          await Promise.allSettled([refreshModels({ refresh: true }), refreshHealth(), refreshBots()]);
+          toast(`网关已更新并重新扫描（${(state.models || []).length} 个模型）`, "success");
+        } else {
+          await Promise.allSettled([refreshBots(), refreshModels()]);
+          toast("设置已保存", "success");
+        }
         refreshContext();
+        ctx.rerender();
       } catch (err) { toast(`保存失败：${err.message}`, "error"); }
     });
   }
@@ -746,19 +1000,76 @@ function bindContent(root, ctx) {
       try { await resetAvatar("bot", ctx.selectedBot); toast("已恢复默认头像"); ctx.rerender(); }
       catch (err) { toast(`恢复失败：${err.message}`, "error"); }
     });
+    const bModelEl = $("#b-model", root);
+    if (bModelEl) {
+      let prevBotModel = bModelEl.value;
+      bModelEl.addEventListener("change", async () => {
+        if (bModelEl.value !== CUSTOM_MODEL_VALUE) {
+          prevBotModel = bModelEl.value;
+          return;
+        }
+        const entered = await promptCustomModel({
+          title: `为 ${profileFor(ctx.selectedBot, state.botsById[ctx.selectedBot]).name} 指定模型 ID`,
+          current: prevBotModel || state.botsById[ctx.selectedBot]?.model || "",
+        });
+        if (!entered) {
+          bModelEl.value = prevBotModel;
+          return;
+        }
+        const opt = document.createElement("option");
+        opt.value = entered;
+        opt.textContent = `${formatModelShort(entered, state.models)} (${entered}) [自定义]`;
+        bModelEl.insertBefore(opt, bModelEl.lastElementChild);
+        bModelEl.value = entered;
+        prevBotModel = entered;
+      });
+    }
+    $("#b-refresh-models", root)?.addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await refreshModels({ refresh: true });
+        const count = (res?.models || state.models || []).length;
+        toast(res?.gateway_ok === false ? `网关离线，沿用本地 ${count} 个模型` : `已刷新 ${count} 个网关模型`, "success");
+        ctx.rerender();
+      } catch (err) {
+        toast(`刷新失败：${err.message}`, "error");
+        btn.disabled = false;
+      }
+    });
+    const bindDraftCapBtn = (selector) => {
+      const el = $(selector, root);
+      if (!el) return;
+      el.addEventListener("click", () => {
+        const nextOn = el.dataset.capVal !== "1";
+        el.dataset.capVal = nextOn ? "1" : "0";
+        el.classList.toggle("is-granted", nextOn);
+        el.setAttribute("aria-pressed", nextOn ? "true" : "false");
+        const stateEl = $(".cap-grant-state", el);
+        if (stateEl) stateEl.textContent = nextOn ? "已授权" : "授予";
+      });
+    };
+    bindDraftCapBtn("#b-browser-toggle");
+    bindDraftCapBtn("#b-computer-toggle");
+
     $("#b-save", root)?.addEventListener("click", async () => {
       const id = ctx.selectedBot;
+      const selectedModel = $("#b-model", root).value;
+      const browserBtn = $("#b-browser-toggle", root);
+      const computerBtn = $("#b-computer-toggle", root);
       const payload = {
         name: $("#b-name", root).value.trim(),
         tagline: $("#b-tagline", root).value.trim(),
-        model: $("#b-model", root).value,
+        model: selectedModel === CUSTOM_MODEL_VALUE ? "" : selectedModel,
         thinking_level: $("#b-thinking", root).value,
         system_prompt: $("#b-prompt", root).value,
+        ...(browserBtn ? { can_use_browser: browserBtn.dataset.capVal === "1" } : {}),
+        ...(computerBtn ? { can_use_computer: computerBtn.dataset.capVal === "1" } : {}),
       };
       try {
         await api.updateBot(id, payload);
-        await refreshBots();
-        toast("机器人设置已保存", "success");
+        await Promise.allSettled([refreshBots(), refreshModels(), refreshRooms()]);
+        toast("机器人设置已保存并立即生效", "success");
         ctx.rerender();
       } catch (err) { toast(`保存失败：${err.message}`, "error"); }
     });

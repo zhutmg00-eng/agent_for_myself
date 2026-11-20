@@ -17,6 +17,8 @@ export const state = {
   avatars: {},
   rooms: [],
   roomById: {},
+  roomsLoading: true,
+  roomsLoaded: false,
   messages: {},          // roomId -> message[] (chat + cards)
   files: {},             // roomId -> file[]
   activity: {},          // roomId -> { round: bool, typing: Set, tools: Map }
@@ -55,6 +57,7 @@ export const state = {
     error: null,
     open: false,
   },
+  automation: null,
   theme: localStorage.getItem("ah-theme") || "light",
   inspector: null,       // { type: 'group'|'bot'|'usage', id }
 };
@@ -85,9 +88,10 @@ export function applyTheme(theme = state.theme) {
 
 export async function boot() {
   applyTheme();
+  state.roomsLoading = true;
   try {
-    const [bots, rooms, settings, models, skills, hooks, context, stats, avatars, health, approvals] = await Promise.allSettled([
-      api.bots(), api.rooms(), api.settings(), api.models(), api.skills(), api.hooks(), api.context(), api.stats(), api.avatars(), api.health(), api.approvals(),
+    const [bots, rooms, settings, models, skills, hooks, context, stats, avatars, health, approvals, automation] = await Promise.allSettled([
+      api.bots(), api.rooms(), api.settings(), api.models(), api.skills(), api.hooks(), api.context(), api.stats(), api.avatars(), api.health(), api.approvals(), api.automationStatus(),
     ]);
     if (bots.status === "fulfilled") setBots(bots.value.bots || []);
     if (rooms.status === "fulfilled") setRooms(rooms.value.rooms || []);
@@ -99,12 +103,16 @@ export async function boot() {
     if (context.status === "fulfilled") state.context = context.value;
     if (stats.status === "fulfilled") state.stats = stats.value;
     if (approvals.status === "fulfilled") applyApprovalsPayload(approvals.value);
+    if (automation.status === "fulfilled") state.automation = automation.value;
     if (avatars.status === "fulfilled") {
       state.avatars = avatars.value.avatars || {};
       setCustomAvatars(state.avatars);
     }
   } catch (err) {
     state.error = err.message || String(err);
+  } finally {
+    state.roomsLoading = false;
+    state.roomsLoaded = true;
   }
   state.ready = true;
   emit();
@@ -175,10 +183,20 @@ export function newActivity() {
   return { round: false, typing: new Set(), tools: new Map(), turnTools: new Map() };
 }
 
-export async function refreshRooms() {
-  const data = await api.rooms();
-  setRooms(data.rooms || (Array.isArray(data) ? data : []));
-  emit();
+export async function refreshRooms({ showSkeleton = false } = {}) {
+  const shouldShowSkeleton = Boolean(showSkeleton || (!state.roomsLoaded && state.rooms.length === 0));
+  if (shouldShowSkeleton) {
+    state.roomsLoading = true;
+    emit();
+  }
+  try {
+    const data = await api.rooms();
+    setRooms(data.rooms || (Array.isArray(data) ? data : []));
+  } finally {
+    state.roomsLoading = false;
+    state.roomsLoaded = true;
+    emit();
+  }
 }
 
 export async function refreshHealth() {
@@ -188,18 +206,69 @@ export async function refreshHealth() {
   } catch { /* health poll is best-effort */ }
 }
 
-export async function refreshModels() {
+export async function refreshModels({ refresh = false } = {}) {
   try {
-    const data = await api.models();
+    const data = await api.models({ refresh });
     state.models = data.data || data.models || [];
+    if (state.health && typeof data.gateway_ok === "boolean") {
+      state.health = {
+        ...state.health,
+        gateway_ok: data.gateway_ok,
+        gateway_models: state.models.length,
+        gateway_url: data.gateway_url || state.health.gateway_url,
+      };
+    }
     emit();
-  } catch { /* gateway may be down; keep the previous catalogue */ }
+    return data;
+  } catch (err) {
+    return { data: state.models, gateway_ok: false, gateway_error: err?.message || String(err) };
+  }
 }
 
 export async function refreshBots() {
   const data = await api.bots();
   setBots(data.bots || []);
   emit();
+}
+
+export async function updateBotModel(botId, model) {
+  const clean = typeof model === "string" ? model.trim() : "";
+  const updated = await api.updateBot(botId, { model: clean });
+  await Promise.allSettled([refreshBots(), refreshModels()]);
+  return updated;
+}
+
+export async function updateBotCapabilities(botId, patch = {}) {
+  const body = {};
+  if (patch.can_use_browser !== undefined) body.can_use_browser = Boolean(patch.can_use_browser);
+  if (patch.can_use_computer !== undefined) body.can_use_computer = Boolean(patch.can_use_computer);
+  const updated = await api.updateBot(botId, body);
+  await Promise.allSettled([refreshBots(), refreshRooms()]);
+  return updated;
+}
+
+export async function refreshAutomation({ refresh = false } = {}) {
+  try {
+    state.automation = await api.automationStatus({ refresh });
+    emit();
+    return state.automation;
+  } catch (err) {
+    return state.automation;
+  }
+}
+
+export async function setAutomationKill(stopped = true) {
+  const res = await api.setAutomationKill(Boolean(stopped));
+  if (res && typeof res === "object") {
+    state.automation = {
+      ...(state.automation || {}),
+      emergency_stopped: Boolean(res.emergency_stopped),
+      browser: res.browser || state.automation?.browser,
+      computer: res.computer || state.automation?.computer,
+    };
+  }
+  emit();
+  return res;
 }
 
 export async function refreshContext() {
@@ -1060,6 +1129,15 @@ export function applyEvent(evt) {
     }
     case "harness.room.created": {
       refreshRooms().catch(() => {});
+      break;
+    }
+    case "harness.automation.updated": {
+      if (payload && typeof payload === "object") {
+        state.automation = { ...(state.automation || {}), ...payload };
+        changed = true;
+      } else {
+        refreshAutomation().catch(() => {});
+      }
       break;
     }
   }

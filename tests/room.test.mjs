@@ -382,6 +382,8 @@ test("room: snapshot exposes the API room shape", async () => {
     can_speak: true,
     context_access: "full",
     can_create_subgroup: false,
+    can_use_browser: false,
+    can_use_computer: false,
     allowed_tool_overrides: null,
   });
 

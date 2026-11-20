@@ -40,6 +40,9 @@ export const ICONS = {
   database: `<svg viewBox="0 0 20 20"><ellipse cx="10" cy="5.5" rx="5.8" ry="2.2"/><path d="M4.2 5.5v9c0 1.2 2.6 2.2 5.8 2.2s5.8-1 5.8-2.2v-9"/><path d="M4.2 10c0 1.2 2.6 2.2 5.8 2.2s5.8-1 5.8-2.2"/></svg>`,
   paperclip: `<svg viewBox="0 0 20 20"><path d="m14.8 9.2-5.6 5.6a3.2 3.2 0 0 1-4.5-4.5l6.4-6.4a2.1 2.1 0 1 1 3 3l-6.4 6.4a1 1 0 0 1-1.5-1.5l5.4-5.4"/></svg>`,
   trash: `<svg viewBox="0 0 20 20"><path d="M4.2 6h11.6M7.6 6V4.4a1 1 0 0 1 1-1h2.8a1 1 0 0 1 1 1V6M6 6l.8 10a1.2 1.2 0 0 0 1.2 1.1h4a1.2 1.2 0 0 0 1.2-1.1L14 6"/></svg>`,
+  globe: `<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.7"/><path d="M3.5 10h13M10 3.3c1.8 2 2.7 4.2 2.7 6.7s-.9 4.7-2.7 6.7c-1.8-2-2.7-4.2-2.7-6.7s.9-4.7 2.7-6.7"/></svg>`,
+  monitor: `<svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="9.6" rx="1.6"/><path d="M7.2 16.4h5.6M10 13.6v2.8"/></svg>`,
+  shieldAlert: `<svg viewBox="0 0 20 20"><path d="M10 3.2 4.2 5.4v4.2c0 3.8 2.5 6.4 5.8 7.6 3.3-1.2 5.8-3.8 5.8-7.6V5.4L10 3.2Z"/><path d="M10 7.4v3.4M10 13.2h.01"/></svg>`,
 };
 
 export function escapeHtml(value) {
@@ -191,6 +194,29 @@ export function scrollToBottom(el, smooth = false) {
 export function isNearBottom(el, threshold = 80) {
   if (!el) return true;
   return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+}
+
+const ROOM_SKEL_WIDTHS = [
+  [64, 82],
+  [50, 72],
+  [74, 58],
+  [56, 76],
+];
+
+export function roomSkeletonHTML(count = 4) {
+  const n = Math.max(1, Math.min(8, Number(count) || 4));
+  let out = "";
+  for (let i = 0; i < n; i += 1) {
+    const [tw, sw] = ROOM_SKEL_WIDTHS[i % ROOM_SKEL_WIDTHS.length];
+    out += `<div class="room-skeleton-row" style="--skel-i:${i}" aria-hidden="true">
+      <span class="skel-block skel-avatar"></span>
+      <span class="skel-copy">
+        <span class="skel-block skel-line is-title" style="width:${tw}%"></span>
+        <span class="skel-block skel-line is-sub" style="width:${sw}%"></span>
+      </span>
+    </div>`;
+  }
+  return out;
 }
 
 /* Pick a local image and crop it to a 512×512 JPEG for the avatar store. */

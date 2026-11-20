@@ -60,6 +60,8 @@ test("manager: create() adds owner+librarian with include_roles and persists eve
     can_speak: true,
     context_access: "full",
     can_create_subgroup: false,
+    can_use_browser: false,
+    can_use_computer: false,
     allowed_tool_overrides: null,
   });
   // The owner keeps the sub-group capability (vision point d).

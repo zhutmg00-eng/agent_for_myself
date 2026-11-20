@@ -118,6 +118,8 @@ export function defaultPermissions(overrides = {}) {
     can_speak: true,
     context_access: "full",
     can_create_subgroup: false,
+    can_use_browser: false,
+    can_use_computer: false,
     allowed_tool_overrides: null,
     ...overrides,
   };

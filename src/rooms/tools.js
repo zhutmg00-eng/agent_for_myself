@@ -13,6 +13,8 @@
  *   - skills are available to all.
  */
 import path from "node:path";
+import { createBrowserTools } from "../automation/browser.js";
+import { createComputerTools } from "../automation/computer.js";
 
 const ok = (text, details = {}) => ({
   content: [{ type: "text", text: String(text) }],
@@ -60,7 +62,11 @@ function adminTools({ room, botId }) {
         const text = members
           .map((m) => {
             const p = m.permissions || {};
-            return `- ${m.bot_id}${m.bot_id === room.owner_id ? "（群主）" : ""}：can_speak=${p.can_speak !== false}，context=${p.context_access || "full"}，can_create_subgroup=${Boolean(p.can_create_subgroup)}`;
+            const caps = [
+              p.can_use_browser ? "browser=on" : null,
+              p.can_use_computer ? "computer=on" : null,
+            ].filter(Boolean);
+            return `- ${m.bot_id}${m.bot_id === room.owner_id ? "（群主）" : ""}：can_speak=${p.can_speak !== false}，context=${p.context_access || "full"}，can_create_subgroup=${Boolean(p.can_create_subgroup)}${caps.length ? `，${caps.join("，")}` : ""}`;
           })
           .join("\n");
         return ok(text || "（无成员）", { members });
@@ -514,10 +520,10 @@ function evidenceTools({ room }) {
 
 /**
  * @param {{room:object, botId:string, permissions?:object, fileSpace:object, skills?:object,
- *          memory?:object, telemetry?:object}} ctx
+ *          memory?:object, telemetry?:object, automation?:{browser?:object, computer?:object}}} ctx
  * @returns {Array<object>} pi ToolDefinition[]
  */
-export function createRoomTools({ room, botId, permissions, fileSpace, skills, memory, telemetry } = {}) {
+export function createRoomTools({ room, botId, permissions, fileSpace, skills, memory, telemetry, automation } = {}) {
   if (!room) throw new Error("createRoomTools requires a room");
   if (!botId) throw new Error("createRoomTools requires botId");
   const perms = permissions || {};
@@ -535,7 +541,14 @@ export function createRoomTools({ room, botId, permissions, fileSpace, skills, m
     execute: async () => {
       const members = room.listMembers?.() || [];
       const text = members
-        .map((m) => `- ${m.bot_id}${m.bot_id === room.owner_id ? "（群主）" : ""}`)
+        .map((m) => {
+          const p = m.permissions || {};
+          const caps = [
+            p.can_use_browser ? "Browser Use" : null,
+            p.can_use_computer ? "Computer Use" : null,
+          ].filter(Boolean);
+          return `- ${m.bot_id}${m.bot_id === room.owner_id ? "（群主）" : ""}${caps.length ? ` [${caps.join(" + ")}]` : ""}`;
+        })
         .join("\n");
       return ok(text || "（无成员）", { members });
     },
@@ -547,6 +560,29 @@ export function createRoomTools({ room, botId, permissions, fileSpace, skills, m
   tools.push(...evidenceTools({ room }));
   tools.push(...skillTools({ skills, botId, telemetry, roomId }));
   tools.push(...memoryTools({ memory, roomId, botId }));
+
+  // Browser Use & Computer Use: OFF by default, mounted ONLY when explicitly manually granted.
+  const auto = automation || room.automation || null;
+  if (perms.can_use_browser && auto?.browser) {
+    tools.push(
+      ...createBrowserTools({
+        manager: auto.browser,
+        sessionKey: `${roomId || "room"}-${botId}`,
+        botId,
+        roomId,
+        canUse: () => Boolean(room.permissionsOf?.(botId)?.can_use_browser),
+      }),
+    );
+  }
+  if (perms.can_use_computer && auto?.computer) {
+    tools.push(
+      ...createComputerTools({
+        driver: auto.computer,
+        botId,
+        canUse: () => Boolean(room.permissionsOf?.(botId)?.can_use_computer),
+      }),
+    );
+  }
 
   return tools;
 }

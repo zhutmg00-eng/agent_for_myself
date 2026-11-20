@@ -132,7 +132,9 @@ export function evalForwardProgress(result, ctx = {}) {
   const mutatingTools = [
     "write", "write_file", "edit", "edit_file", "bash", "powershell",
     "room_file_save", "room_file_move", "room_assign_task", "room_create_subgroup",
-    "room_grant_permission", "room_revoke_permission", "room_set_context_policy"
+    "room_grant_permission", "room_revoke_permission", "room_set_context_policy",
+    "browser_open", "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_eval",
+    "computer_focus_window", "computer_click", "computer_drag", "computer_type", "computer_hotkey", "computer_scroll"
   ];
   const hasMutating = successfulTools.some((t) => mutatingTools.includes(t.name)) ||
     toolsUsed.some((name) => mutatingTools.includes(name) && !result?.error);
@@ -143,7 +145,9 @@ export function evalForwardProgress(result, ctx = {}) {
   // Tier 2: Observational / information retrieval tools
   const observationalTools = [
     "read", "read_file", "grep", "grep_search", "find", "find_by_name", "ls", "list_dir",
-    "room_file_read", "room_file_list", "room_evidence_status", "skill_invoke", "memory"
+    "room_file_read", "room_file_list", "room_evidence_status", "skill_invoke", "memory",
+    "browser_snapshot", "browser_screenshot", "browser_close",
+    "computer_list_windows", "computer_screenshot", "computer_wait"
   ];
   const hasObservational = successfulTools.some((t) => observationalTools.includes(t.name)) ||
     toolsUsed.some((name) => observationalTools.includes(name) && !result?.error);
@@ -242,7 +246,7 @@ export class Room {
    * @param {{record:object, store:object, events:object, engine:object, hooks?:object,
    *          skills?:object, archetypes?:object, manager?:object}} options
    */
-  constructor({ record, store, events, engine, hooks, skills, archetypes, manager, approval, memory, telemetry } = {}) {
+  constructor({ record, store, events, engine, hooks, skills, archetypes, manager, approval, memory, telemetry, automation } = {}) {
     if (!record || !record.room_id) throw new Error("Room requires a record with room_id");
     this.store = store;
     this.events = events;
@@ -251,10 +255,11 @@ export class Room {
     this.skills = skills;
     this.archetypes = archetypes;
     this.manager = manager;
-    // 审批 / 记忆 / 技能遥测：整进程单例，由 createApp 注入（见 docs/hermes/*.md 的接入清单）。
+    // 审批 / 记忆 / 技能遥测 / 自动化操控：整进程单例，由 createApp 注入。
     this.approval = approval || manager?.approval || null;
     this.memory = memory || manager?.memory || null;
     this.telemetry = telemetry || manager?.telemetry || null;
+    this.automation = automation || manager?.automation || null;
 
     this.room_id = String(record.room_id);
     this.title = record.title || "";
@@ -545,6 +550,8 @@ export class Room {
       if (["full", "summary", "none"].includes(value)) next.context_access = value;
     }
     if (patch.can_create_subgroup !== undefined) next.can_create_subgroup = Boolean(patch.can_create_subgroup);
+    if (patch.can_use_browser !== undefined) next.can_use_browser = Boolean(patch.can_use_browser);
+    if (patch.can_use_computer !== undefined) next.can_use_computer = Boolean(patch.can_use_computer);
     if (Array.isArray(patch.allowed_tool_overrides)) next.allowed_tool_overrides = patch.allowed_tool_overrides.map(String);
     this.member_permissions[id] = next;
     try {
@@ -562,6 +569,8 @@ export class Room {
     const next = { ...this.permissionsOf(id) };
     if (key === "can_speak") next.can_speak = false;
     else if (key === "can_create_subgroup") next.can_create_subgroup = false;
+    else if (key === "can_use_browser") next.can_use_browser = false;
+    else if (key === "can_use_computer") next.can_use_computer = false;
     else if (key === "context_access") next.context_access = "none";
     else if (key === "allowed_tool_overrides") next.allowed_tool_overrides = null;
     else throw new Error(`未知权限：${key}`);
@@ -675,6 +684,7 @@ export class Room {
       skills: this.skills,
       memory: this.memory,
       telemetry: this.telemetry,
+      automation: this.automation,
     });
     runner = new BotRunner({
       bot,
@@ -697,6 +707,7 @@ export class Room {
     const runner = this._runners.get(String(botId));
     if (!runner) return;
     try {
+      const prevCustomSig = (runner.customTools || []).map((t) => t?.name || "").sort().join(",");
       const customTools = createRoomTools({
         room: this,
         botId: String(botId),
@@ -705,10 +716,17 @@ export class Room {
         skills: this.skills,
         memory: this.memory,
         telemetry: this.telemetry,
+        automation: this.automation,
       });
       runner.setCustomTools?.(customTools);
-      const names = (customTools || []).map((t) => t.name);
-      runner.setActiveTools?.(names);
+      const nextCustomSig = (customTools || []).map((t) => t?.name || "").sort().join(",");
+      if (prevCustomSig !== nextCustomSig && runner.session) {
+        // Custom tool schema list changed (e.g. Browser Use / Computer Use granted or revoked):
+        // drop the live pi session so the next turn registers the exact new tool schemas.
+        runner.resetSession?.();
+      } else {
+        runner.setActiveTools?.(runner.activeToolNames ? runner.activeToolNames() : (customTools || []).map((t) => t.name));
+      }
     } catch (err) {
       log.warn("refreshRunnerTools failed", err?.message || err);
     }

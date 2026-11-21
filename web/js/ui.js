@@ -43,6 +43,13 @@ export const ICONS = {
   globe: `<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.7"/><path d="M3.5 10h13M10 3.3c1.8 2 2.7 4.2 2.7 6.7s-.9 4.7-2.7 6.7c-1.8-2-2.7-4.2-2.7-6.7s.9-4.7 2.7-6.7"/></svg>`,
   monitor: `<svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="9.6" rx="1.6"/><path d="M7.2 16.4h5.6M10 13.6v2.8"/></svg>`,
   shieldAlert: `<svg viewBox="0 0 20 20"><path d="M10 3.2 4.2 5.4v4.2c0 3.8 2.5 6.4 5.8 7.6 3.3-1.2 5.8-3.8 5.8-7.6V5.4L10 3.2Z"/><path d="M10 7.4v3.4M10 13.2h.01"/></svg>`,
+  activity: `<svg viewBox="0 0 20 20"><path d="M2.8 10.5h3.2l2.2-5.4 3.4 9.8 2.2-4.4h3.4"/></svg>`,
+  folderOpen: `<svg viewBox="0 0 20 20"><path d="M3 6.2A1.4 1.4 0 0 1 4.4 4.8h3.1l1.4 1.6h6.4a1.4 1.4 0 0 1 1.4 1.4v1H5.2a1.4 1.4 0 0 0-1.3 1l-1 4.8V6.2Z"/><path d="M3.2 15.2 4.4 9.8A1.2 1.2 0 0 1 5.6 8.8h11.1a1 1 0 0 1 1 1.2l-1.1 4.4a1.4 1.4 0 0 1-1.4 1.1H4.1a.9.9 0 0 1-.9-.3Z"/></svg>`,
+  gitBranch: `<svg viewBox="0 0 20 20"><circle cx="6.2" cy="5.4" r="1.8"/><circle cx="6.2" cy="14.6" r="1.8"/><circle cx="14.2" cy="7.4" r="1.8"/><path d="M6.2 7.2v5.6M14.2 9.2c0 2.6-1.8 3.6-4.4 3.6H8"/></svg>`,
+  messageSquare: `<svg viewBox="0 0 20 20"><path d="M4 5.2A1.7 1.7 0 0 1 5.7 3.5h8.6A1.7 1.7 0 0 1 16 5.2v7.2a1.7 1.7 0 0 1-1.7 1.7H8l-3.4 2.6v-2.6H5.7A1.7 1.7 0 0 1 4 12.4Z"/></svg>`,
+  terminal: `<svg viewBox="0 0 20 20"><path d="m4.8 6.4 3.8 3.6-3.8 3.6M10.4 13.6h4.8"/></svg>`,
+  stop: `<svg viewBox="0 0 20 20"><rect x="5.5" y="5.5" width="9" height="9" rx="1.6" fill="currentColor" stroke="none"/></svg>`,
+  arrowUp: `<svg viewBox="0 0 20 20"><path d="M10 15.5V5m0 0-4 4m4-4 4 4"/></svg>`,
 };
 
 export function escapeHtml(value) {

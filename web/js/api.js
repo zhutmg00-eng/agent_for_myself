@@ -237,6 +237,44 @@ export const api = {
     request(`/api/automation/status${refresh ? "?refresh=1" : ""}`, { timeout: 8000 }),
   setAutomationKill: (stopped = true) =>
     request("/api/automation/kill", { method: "POST", body: { stopped: Boolean(stopped) }, timeout: 8000 }),
+
+  /* 实时性能监控（Recharts 面板数据源） */
+  perf: () => request("/api/perf", { timeout: 6000 }),
+
+  /* 项目目录管理与文件浏览 */
+  projects: () => request("/api/projects", { timeout: 8000 }),
+  project: (id) => request(`/api/projects/${encodeURIComponent(id)}`, { timeout: 8000 }),
+  createProject: (payload) => request("/api/projects", { method: "POST", body: payload, timeout: 10000 }),
+  updateProject: (id, payload) => request(`/api/projects/${encodeURIComponent(id)}`, { method: "PUT", body: payload, timeout: 10000 }),
+  deleteProject: (id) => request(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE", timeout: 8000 }),
+  activateProject: (id) => request(`/api/projects/${encodeURIComponent(id)}/activate`, { method: "POST", body: {}, timeout: 8000 }),
+  projectTree: (id, subpath = "") =>
+    request(`/api/projects/${encodeURIComponent(id)}/tree${subpath ? `?subpath=${encodeURIComponent(subpath)}` : ""}`, { timeout: 8000 }),
+  projectFile: (id, relPath) =>
+    request(`/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(relPath)}`, { timeout: 10000 }),
+  fsBrowse: (dirPath = "") =>
+    request(`/api/fs/browse${dirPath ? `?path=${encodeURIComponent(dirPath)}` : ""}`, { timeout: 8000 }),
+
+  /* 1v1 私聊直连 */
+  dms: () => request("/api/dms", { timeout: 8000 }),
+  dmMessages: (botId, limit = 200) =>
+    request(`/api/dm/${encodeURIComponent(botId)}/messages?limit=${encodeURIComponent(limit)}`, { timeout: 10000 }),
+  dmSay: (botId, content, projectId) =>
+    request(`/api/dm/${encodeURIComponent(botId)}/say`, {
+      method: "POST",
+      body: { content, ...(projectId !== undefined ? { project_id: projectId } : {}) },
+      timeout: 60000,
+    }),
+  dmSetProject: (botId, projectId) =>
+    request(`/api/dm/${encodeURIComponent(botId)}`, {
+      method: "PUT",
+      body: { project_id: projectId ?? null },
+      timeout: 8000,
+    }),
+  dmClear: (botId) =>
+    request(`/api/dm/${encodeURIComponent(botId)}/messages`, { method: "DELETE", timeout: 8000 }),
+  dmAbort: (botId) =>
+    request(`/api/dm/${encodeURIComponent(botId)}/abort`, { method: "POST", body: {}, timeout: 8000 }),
 };
 
 /* --------------------------------------------------------------- approvals */

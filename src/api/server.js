@@ -47,6 +47,16 @@ import {
 } from "../config.js";
 import { createLogger, readTail } from "../log.js";
 import { EventBus } from "../events.js";
+import { PerfMonitor } from "../perf_monitor.js";
+import { DirectChatManager } from "../dm/manager.js";
+import {
+  validateProjectDir,
+  detectGitBranch,
+  browseDirectory,
+  listProjectTree,
+  readProjectFilePreview,
+} from "../projects.js";
+import { setExtraWorkspaceRoots } from "../approval.js";
 
 const log = createLogger("api");
 
@@ -639,7 +649,88 @@ export async function createApp(options = {}) {
   /* seed the default roster when the database has no bots yet */
   await seedDefaultBots(app);
 
+  /* Performance monitor (live memory % + token processing speed ring buffer) */
+  app.perfMonitor = options.perfMonitor || new PerfMonitor();
+  if (typeof app.perfMonitor.start === "function" && options.startPerfTimer !== false) {
+    app.perfMonitor.start();
+  }
+  if (app.events?.subscribe) {
+    app._unsubPerfEvents = app.events.subscribe((evt) => {
+      const topic = String(evt?.topic || "");
+      const m = topic.match(/^worker\.([^.]+)\.(turn_started|turn_completed)$/);
+      if (!m) return;
+      const [, botId, kind] = m;
+      if (kind === "turn_started") {
+        app.perfMonitor?.beginTurn?.();
+      } else if (kind === "turn_completed") {
+        app.perfMonitor?.endTurn?.();
+        const p = evt.payload || {};
+        const tel = p.telemetry || {};
+        const usage = p.usage || {};
+        if (tel.tps || tel.ttft_ms || usage.input || usage.output) {
+          app.perfMonitor?.recordTurnTelemetry?.({
+            tps: tel.tps || 0,
+            ttft_ms: tel.ttft_ms || 0,
+            input_tokens: usage.input || 0,
+            output_tokens: usage.output || 0,
+            bot_id: botId,
+          });
+        }
+      }
+    });
+  }
+
+  /* Projects: seed default workspace project if none exists & sync approval roots */
+  seedDefaultProject(app);
+  syncProjectWorkspaceRoots(app);
+
+  /* Direct 1-on-1 Private Chat manager */
+  app.dm = options.dm || new DirectChatManager({
+    store: app.store,
+    events: app.events,
+    engine: app.engine,
+    hooks: app.hooksModule,
+    skills: app.skills,
+    archetypes: app.archetypesModule,
+    approval: app.approval,
+    memory: app.memory,
+    automation: app.automation,
+    perfMonitor: app.perfMonitor,
+  });
+
   return app;
+}
+
+function seedDefaultProject(app) {
+  if (!app.store?.listProjects) return;
+  try {
+    const existing = app.store.listProjects();
+    if (existing.length) {
+      if (!app.store.getActiveProjectId()) {
+        app.store.setActiveProjectId(existing[0].id);
+      }
+      return;
+    }
+    const created = app.store.createProject({
+      id: "default-workspace",
+      name: "默认工作区",
+      root_path: DIRS.workspace,
+      description: "AgentFusion 默认工作目录",
+    });
+    if (created?.id) app.store.setActiveProjectId(created.id);
+  } catch (err) {
+    log.warn("seedDefaultProject failed:", errorMessage(err));
+  }
+}
+
+function syncProjectWorkspaceRoots(app) {
+  if (!app.store?.listProjects) return;
+  try {
+    const roots = app.store.listProjects().map((p) => p.root_path).filter(Boolean);
+    setExtraWorkspaceRoots(roots);
+  } catch (err) {
+    log.debug("syncProjectWorkspaceRoots failed:", errorMessage(err));
+  }
 }
 
 async function seedDefaultBots(app) {
@@ -664,6 +755,21 @@ async function seedDefaultBots(app) {
 }
 
 async function disposeApp(app) {
+  try {
+    app._unsubPerfEvents?.();
+  } catch {
+    /* ignore */
+  }
+  try {
+    app.perfMonitor?.dispose?.();
+  } catch (err) {
+    log.debug("perfMonitor.dispose failed:", errorMessage(err));
+  }
+  try {
+    app.dm?.dispose?.();
+  } catch (err) {
+    log.debug("dm.dispose failed:", errorMessage(err));
+  }
   try {
     app.rooms?.disposeAll?.();
     app.rooms?.dispose?.();
@@ -2068,6 +2174,7 @@ async function createRoom(app, body) {
     return { status: 400, body: { error: `Owner '${effectiveOwner}' must be one of the room members.` } };
   }
 
+  const projectId = body.project_id ? String(body.project_id).trim() : null;
   let created;
   try {
     created = await app.rooms.create({
@@ -2076,6 +2183,7 @@ async function createRoom(app, body) {
       members,
       context_policy: contextPolicy,
       topic,
+      project_id: projectId,
       include_librarian: includeRoles,
       include_roles: includeRoles,
     });
@@ -2280,11 +2388,29 @@ async function updateRoom(app, roomId, body) {
     }
   }
 
-  if (applied.title || applied.topic || applied.context_policy) {
+  // 7) project_id（绑定项目目录）
+  if (body.project_id !== undefined) {
+    const nextPid = body.project_id ? String(body.project_id).trim() : null;
+    if (nextPid && !app.store?.getProject?.(nextPid)) {
+      return { status: 400, body: { error: `Unknown project '${nextPid}'` } };
+    }
+    if (room && typeof room.setProject === "function") {
+      try {
+        await room.setProject(nextPid);
+      } catch (err) {
+        return { status: statusForError(err, 400), body: { error: errorMessage(err) } };
+      }
+    }
+    persistRoomRow(app, roomId, { project_id: nextPid });
+    applied.project_id = nextPid;
+  }
+
+  if (applied.title || applied.topic || applied.context_policy || applied.project_id !== undefined) {
     persistRoomRow(app, roomId, {
       ...(applied.title !== undefined ? { title: applied.title } : {}),
       ...(applied.topic !== undefined ? { topic: applied.topic } : {}),
       ...(applied.context_policy !== undefined ? { context_policy: applied.context_policy } : {}),
+      ...(applied.project_id !== undefined ? { project_id: applied.project_id } : {}),
     });
   }
 
@@ -2292,6 +2418,7 @@ async function updateRoom(app, roomId, body) {
   if (applied.title !== undefined) snapshot.title = applied.title;
   if (applied.topic !== undefined) snapshot.topic = applied.topic;
   if (applied.context_policy !== undefined) snapshot.context_policy = applied.context_policy;
+  if (applied.project_id !== undefined) snapshot.project_id = applied.project_id;
   try {
     await app.events?.publish?.({
       topic: `room.${roomId}.updated`,
@@ -2421,6 +2548,16 @@ const ROUTES = {
   memoryEntry: /^\/api\/memory\/([^/]+)$/,
   // 自动化操控产物（Browser Use / Computer Use 截图）
   automationArtifact: /^\/api\/automation\/artifacts\/([^/]+)$/,
+  // 项目管理（指定本地目录操作）
+  projectActivate: /^\/api\/projects\/([^/]+)\/activate$/,
+  projectTree: /^\/api\/projects\/([^/]+)\/tree$/,
+  projectFile: /^\/api\/projects\/([^/]+)\/file$/,
+  project: /^\/api\/projects\/([^/]+)$/,
+  // 1v1 私聊
+  dmMessages: /^\/api\/dm\/([^/]+)\/messages$/,
+  dmSay: /^\/api\/dm\/([^/]+)\/say$/,
+  dmAbort: /^\/api\/dm\/([^/]+)\/abort$/,
+  dmBot: /^\/api\/dm\/([^/]+)$/,
 };
 
 function badPathId(decoded) {
@@ -2466,6 +2603,20 @@ async function handleApi(app, req, res, url) {
   /* E02 stats */
   if (method === "GET" && pathname === "/api/stats") {
     return sendJson(res, 200, statsPayload(app));
+  }
+
+  /* Real-time system & token performance metrics (Recharts monitor) */
+  if (method === "GET" && pathname === "/api/perf") {
+    let storeUsage = null;
+    try {
+      storeUsage = app.store?.usageSummary?.({ allFields: true }) || null;
+    } catch {
+      storeUsage = null;
+    }
+    const snap = app.perfMonitor
+      ? app.perfMonitor.snapshot({ storeUsage, uptimeMs: Date.now() - app.startedAt })
+      : new PerfMonitor().snapshot({ storeUsage, uptimeMs: Date.now() - app.startedAt });
+    return sendJson(res, 200, snap);
   }
 
   /* E03 context */
@@ -2576,6 +2727,7 @@ async function handleApi(app, req, res, url) {
           try {
             await app.engine?.ensureModel?.(updated.model);
             await app.rooms?.syncBotModel?.(botId, updated.model);
+            await app.dm?.syncBot?.(botId);
           } catch (err) {
             log.warn("bot model runtime sync failed:", botId, errorMessage(err));
           }
@@ -2586,6 +2738,7 @@ async function handleApi(app, req, res, url) {
               ...(body.can_use_browser !== undefined ? { can_use_browser: Boolean(body.can_use_browser) } : {}),
               ...(body.can_use_computer !== undefined ? { can_use_computer: Boolean(body.can_use_computer) } : {}),
             });
+            await app.dm?.syncBot?.(botId);
           } catch (err) {
             log.warn("bot capability runtime sync failed:", botId, errorMessage(err));
           }
@@ -2724,6 +2877,234 @@ async function handleApi(app, req, res, url) {
       return notFound(res, "artifact not found");
     }
     return sendBuffer(res, 200, data, { contentType: "image/png", cacheControl: "public, max-age=3600" });
+  }
+
+  /* ---------------------------------------------------------------- Projects & Filesystem Browser */
+  if (method === "GET" && pathname === "/api/fs/browse") {
+    const raw = url.searchParams.get("path") || "";
+    try {
+      return sendJson(res, 200, browseDirectory(raw));
+    } catch (err) {
+      return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+    }
+  }
+
+  if (pathname === "/api/projects" && method === "GET") {
+    const activeId = app.store?.getActiveProjectId?.() || null;
+    const rows = (app.store?.listProjects?.() || []).map((p) => ({
+      ...p,
+      exists: fs.existsSync(p.root_path),
+      git_branch: fs.existsSync(p.root_path) ? detectGitBranch(p.root_path) : null,
+      active: p.id === activeId,
+    }));
+    return sendJson(res, 200, { projects: rows, active_project_id: activeId });
+  }
+
+  if (pathname === "/api/projects" && method === "POST") {
+    const body = await readJson(req);
+    try {
+      const checked = validateProjectDir(body.root_path || body.path, {
+        createIfMissing: Boolean(body.create_if_missing),
+      });
+      const existing = (app.store?.listProjects?.() || []).find((p) => p.root_path === checked.root_path);
+      if (existing) {
+        if (body.activate !== false) app.store.setActiveProjectId(existing.id);
+        return sendJson(res, 200, {
+          project: { ...existing, exists: true, git_branch: detectGitBranch(existing.root_path), active: body.activate !== false },
+          active_project_id: app.store.getActiveProjectId(),
+          existed: true,
+        });
+      }
+      const created = app.store.createProject({
+        name: String(body.name || "").trim() || checked.default_name,
+        root_path: checked.root_path,
+        description: String(body.description || "").trim(),
+      });
+      if (body.activate !== false) {
+        app.store.setActiveProjectId(created.id);
+      }
+      syncProjectWorkspaceRoots(app);
+      const enriched = {
+        ...created,
+        exists: true,
+        git_branch: detectGitBranch(created.root_path),
+        active: app.store.getActiveProjectId() === created.id,
+      };
+      try {
+        await app.events?.publish?.({
+          topic: "harness.projects.updated",
+          sender: "server",
+          payload: { active_project_id: app.store.getActiveProjectId(), project: enriched },
+        });
+      } catch {
+        /* ignore */
+      }
+      return sendJson(res, 201, { project: enriched, active_project_id: app.store.getActiveProjectId() });
+    } catch (err) {
+      return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+    }
+  }
+
+  const projActivate = pathname.match(ROUTES.projectActivate);
+  if (projActivate && method === "POST") {
+    const pid = safeDecode(projActivate[1]);
+    const proj = app.store?.getProject?.(pid);
+    if (!proj) return notFound(res, "project not found");
+    app.store.setActiveProjectId(pid);
+    try {
+      await app.events?.publish?.({
+        topic: "harness.projects.updated",
+        sender: "server",
+        payload: { active_project_id: pid, project: proj },
+      });
+    } catch {
+      /* ignore */
+    }
+    return sendJson(res, 200, { ok: true, active_project_id: pid, project: proj });
+  }
+
+  const projTree = pathname.match(ROUTES.projectTree);
+  if (projTree && method === "GET") {
+    const pid = safeDecode(projTree[1]);
+    const proj = app.store?.getProject?.(pid);
+    if (!proj) return notFound(res, "project not found");
+    const subpath = url.searchParams.get("subpath") || "";
+    try {
+      return sendJson(res, 200, { project: proj, ...listProjectTree(proj.root_path, subpath) });
+    } catch (err) {
+      return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+    }
+  }
+
+  const projFile = pathname.match(ROUTES.projectFile);
+  if (projFile && method === "GET") {
+    const pid = safeDecode(projFile[1]);
+    const proj = app.store?.getProject?.(pid);
+    if (!proj) return notFound(res, "project not found");
+    const rel = url.searchParams.get("path") || "";
+    try {
+      return sendJson(res, 200, { project_id: pid, ...readProjectFilePreview(proj.root_path, rel) });
+    } catch (err) {
+      return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+    }
+  }
+
+  const projMatch = pathname.match(ROUTES.project);
+  if (projMatch) {
+    const pid = safeDecode(projMatch[1]);
+    if (badPathId(pid)) return notFound(res, "project not found");
+    const existing = app.store?.getProject?.(pid);
+    if (!existing) return notFound(res, "project not found");
+    if (method === "GET") {
+      return sendJson(res, 200, {
+        ...existing,
+        exists: fs.existsSync(existing.root_path),
+        git_branch: fs.existsSync(existing.root_path) ? detectGitBranch(existing.root_path) : null,
+        active: app.store.getActiveProjectId() === pid,
+      });
+    }
+    if (method === "PUT") {
+      const body = await readJson(req);
+      try {
+        const patch = {};
+        if (typeof body.name === "string") patch.name = body.name.trim();
+        if (typeof body.description === "string") patch.description = body.description.trim();
+        if (typeof body.root_path === "string" && body.root_path.trim()) {
+          const checked = validateProjectDir(body.root_path, { createIfMissing: Boolean(body.create_if_missing) });
+          patch.root_path = checked.root_path;
+        }
+        const updated = app.store.updateProject(pid, patch);
+        syncProjectWorkspaceRoots(app);
+        return sendJson(res, 200, { project: updated });
+      } catch (err) {
+        return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+      }
+    }
+    if (method === "DELETE") {
+      app.store.deleteProject(pid);
+      syncProjectWorkspaceRoots(app);
+      try {
+        await app.events?.publish?.({
+          topic: "harness.projects.updated",
+          sender: "server",
+          payload: { active_project_id: app.store.getActiveProjectId(), deleted_id: pid },
+        });
+      } catch {
+        /* ignore */
+      }
+      return sendJson(res, 200, { ok: true, deleted_id: pid, active_project_id: app.store.getActiveProjectId() });
+    }
+    return sendJson(res, 405, { error: "method not allowed" });
+  }
+
+  /* ---------------------------------------------------------------- 1v1 Direct Messages (私聊) */
+  if (method === "GET" && pathname === "/api/dms") {
+    return sendJson(res, 200, {
+      dms: app.dm ? app.dm.listConversations() : [],
+      active_project_id: app.store?.getActiveProjectId?.() || null,
+    });
+  }
+
+  const dmMessagesMatch = pathname.match(ROUTES.dmMessages);
+  if (dmMessagesMatch) {
+    const botId = safeDecode(dmMessagesMatch[1]);
+    if (badPathId(botId) || !findBot(app, botId)) return notFound(res, `Bot '${botId}' not found`);
+    if (method === "GET") {
+      const limit = clamp(qInt(url, "limit", 200), 1, 2000);
+      const messages = app.dm ? app.dm.getMessages(botId, limit) : [];
+      const projectId = app.store?.getDmProjectId?.(botId) || null;
+      const effectiveProject = app.dm?.resolveProject?.(botId) || null;
+      return sendJson(res, 200, {
+        bot_id: botId,
+        messages,
+        project_id: projectId,
+        effective_project: effectiveProject,
+        busy: Boolean(app.dm?.isBusy?.(botId)),
+      });
+    }
+    if (method === "DELETE") {
+      const result = app.dm ? app.dm.clear(botId) : { ok: true, bot_id: botId };
+      return sendJson(res, 200, result);
+    }
+    return sendJson(res, 405, { error: "method not allowed" });
+  }
+
+  const dmSayMatch = pathname.match(ROUTES.dmSay);
+  if (dmSayMatch && method === "POST") {
+    const botId = safeDecode(dmSayMatch[1]);
+    if (badPathId(botId) || !findBot(app, botId)) return notFound(res, `Bot '${botId}' not found`);
+    if (!app.dm) return sendJson(res, 503, { error: "direct chat runtime unavailable" });
+    const body = await readJson(req);
+    try {
+      const resPayload = app.dm.say(botId, body.content, {
+        projectId: body.project_id !== undefined ? body.project_id : undefined,
+      });
+      return sendJson(res, 200, resPayload);
+    } catch (err) {
+      return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+    }
+  }
+
+  const dmAbortMatch = pathname.match(ROUTES.dmAbort);
+  if (dmAbortMatch && method === "POST") {
+    const botId = safeDecode(dmAbortMatch[1]);
+    if (badPathId(botId) || !findBot(app, botId)) return notFound(res, `Bot '${botId}' not found`);
+    const aborted = Boolean(app.dm?.abort?.(botId));
+    return sendJson(res, 200, { ok: true, bot_id: botId, aborted });
+  }
+
+  const dmBotMatch = pathname.match(ROUTES.dmBot);
+  if (dmBotMatch && method === "PUT") {
+    const botId = safeDecode(dmBotMatch[1]);
+    if (badPathId(botId) || !findBot(app, botId)) return notFound(res, `Bot '${botId}' not found`);
+    if (!app.dm) return sendJson(res, 503, { error: "direct chat runtime unavailable" });
+    const body = await readJson(req);
+    try {
+      const updated = app.dm.setProject(botId, body.project_id ?? null);
+      return sendJson(res, 200, updated);
+    } catch (err) {
+      return sendJson(res, statusForError(err, 400), { error: errorMessage(err) });
+    }
   }
 
   /* ---------------------------------------------------------------- Hermes 吸收层 */

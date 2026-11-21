@@ -272,6 +272,7 @@ export class Room {
     this.status = record.status || "active";
     // 房间级设置（Hermes 式工具面裁剪等）；旧库没有该列时为空对象。
     this.settings = record.settings && typeof record.settings === "object" ? { ...record.settings } : {};
+    this.project_id = record.project_id ? String(record.project_id) : null;
     this.created_at = record.created_at || nowIso();
     this.updated_at = record.updated_at || this.created_at;
 
@@ -443,6 +444,7 @@ export class Room {
       topic: this.topic,
       context_policy: this.context_policy,
       settings: { ...this.settings },
+      project_id: this.project_id || null,
       orchestrator_mode: this.owner_id ? "dispatch" : "legacy",
       status: this.status,
       relays: this.relays,
@@ -620,6 +622,36 @@ export class Room {
     return this.title;
   }
 
+  /** Resolve effective Project for this room (explicit room.project_id -> active project -> null). */
+  resolveProject() {
+    const pid = this.project_id || this.store?.getActiveProjectId?.() || null;
+    if (!pid) return null;
+    return this.store?.getProject?.(pid) || null;
+  }
+
+  async setProject(projectId) {
+    const clean = projectId ? String(projectId).trim() : null;
+    if (clean && !this.store?.getProject?.(clean)) {
+      throw new Error(`项目不存在：${clean}`);
+    }
+    this.project_id = clean;
+    try {
+      this.store?.upsertRoom?.({ ...this.snapshot(), project_id: clean });
+    } catch (err) {
+      log.warn("persist room project_id failed", err?.message || err);
+    }
+    const nextCwd = this.resolveProject()?.root_path || null;
+    for (const runner of this._runners.values()) {
+      try {
+        runner.setCwd?.(nextCwd);
+      } catch (err) {
+        log.warn("update runner cwd failed", err?.message || err);
+      }
+    }
+    await this.touch();
+    return clean;
+  }
+
   /**
    * 合并房间级设置（`disabled_toolsets`、上下文预算等）并热更新每个成员的 pi 会话工具面。
    *
@@ -686,6 +718,7 @@ export class Room {
       telemetry: this.telemetry,
       automation: this.automation,
     });
+    const project = this.resolveProject();
     runner = new BotRunner({
       bot,
       engine: this.engine,
@@ -694,6 +727,7 @@ export class Room {
       hooks: this.hooks,
       skills: this.skills,
       approval: this.approval,
+      cwd: project?.root_path || null,
       disabledToolsets: Array.isArray(this.settings?.disabled_toolsets) ? this.settings.disabled_toolsets : undefined,
       roomContext: { roomId: this.room_id },
       customTools,
@@ -863,6 +897,10 @@ export class Room {
       sections.push(
         `=== 群文件空间（按 file_id 引用，路径可能被文件管家调整，永远以本清单为准） ===\n${index}`,
       );
+    }
+    const boundProject = this.resolveProject();
+    if (boundProject?.root_path) {
+      sections.push(`=== 当前项目工作目录 ===\n名称：${boundProject.name}\n路径：${boundProject.root_path}`);
     }
     if (this.topic) sections.push(`=== 群主题 ===\n${this.topic}`);
     sections.push(`=== 本轮消息 ===\n${roundMessage}`);

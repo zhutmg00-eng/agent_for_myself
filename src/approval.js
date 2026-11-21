@@ -38,7 +38,29 @@ const WORKSPACE_ROOTS = [DIRS.workspace, DIRS.rooms]
   .map((p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase())
   .filter(Boolean);
 
-/** 路径是否落在本进程的工作区 / 群文件空间内（相对路径视为相对 bot cwd = 工作区内）。 */
+const EXTRA_WORKSPACE_ROOTS = new Set();
+
+function normalizeRoot(p) {
+  const s = String(p ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return s || "";
+}
+
+/** Register an additional project directory as an in-workspace root (smart mode). */
+export function registerWorkspaceRoot(dirPath) {
+  const norm = normalizeRoot(dirPath);
+  if (norm) EXTRA_WORKSPACE_ROOTS.add(norm);
+}
+
+/** Replace the dynamic project workspace root set (e.g. after project CRUD). */
+export function setExtraWorkspaceRoots(paths = []) {
+  EXTRA_WORKSPACE_ROOTS.clear();
+  for (const p of Array.isArray(paths) ? paths : []) {
+    const norm = normalizeRoot(p);
+    if (norm) EXTRA_WORKSPACE_ROOTS.add(norm);
+  }
+}
+
+/** 路径是否落在本进程的工作区 / 群文件空间 / 已注册项目目录内（相对路径视为相对 bot cwd = 工作区内）。 */
 export function isInsideWorkspace(raw) {
   const value = String(raw ?? "").trim().replace(/\\/g, "/");
   if (!value) return false;
@@ -50,7 +72,11 @@ export function isInsideWorkspace(raw) {
     return true;
   }
   const lower = path.posix.normalize(value).toLowerCase();
-  return WORKSPACE_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`));
+  if (WORKSPACE_ROOTS.some((root) => lower === root || lower.startsWith(`${root}/`))) return true;
+  for (const root of EXTRA_WORKSPACE_ROOTS) {
+    if (lower === root || lower.startsWith(`${root}/`)) return true;
+  }
+  return false;
 }
 
 export const APPROVAL_MODES = ["yolo", "smart", "ask"]; // 宽松 -> 严格

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "magpie": {
+      "name": "Magpie Gateway",
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-completions",
+      "apiKey": "magpie-local",
+      "compat": {
+        "sendSessionAffinityHeaders": true
+      },
+      "models": [
+        {
+          "id": "auto/deepseek-v4.1-flash",
+          "name": "DeepSeek V4.1 Flash",
+          "input": [
+            "text"
+          ],
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 32768,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}

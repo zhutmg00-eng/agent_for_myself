@@ -141,6 +141,7 @@ export class RoomManager {
       status: "active",
       // 房间级设置：工具面裁剪等（Hermes toolset 语义的房间维度）。
       settings: input.settings && typeof input.settings === "object" ? { ...input.settings } : {},
+      project_id: input.project_id ? String(input.project_id) : (this.store?.getActiveProjectId?.() || null),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };

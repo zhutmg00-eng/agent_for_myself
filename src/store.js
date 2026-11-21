@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS rooms(
   context_policy TEXT DEFAULT 'shared',
   status TEXT DEFAULT 'active',
   settings_json TEXT,
+  project_id TEXT,
   created_at TEXT,
   updated_at TEXT
 );
@@ -85,6 +86,27 @@ CREATE TABLE IF NOT EXISTS usage(
 CREATE INDEX IF NOT EXISTS idx_usage_room ON usage(room_id);
 CREATE INDEX IF NOT EXISTS idx_usage_bot ON usage(bot_id);
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
+CREATE TABLE IF NOT EXISTS projects(
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  root_path TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  created_at TEXT,
+  updated_at TEXT,
+  last_opened_at TEXT
+);
+CREATE TABLE IF NOT EXISTS dm_messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  speaker TEXT NOT NULL,
+  content TEXT,
+  tools_json TEXT,
+  telemetry_json TEXT,
+  model TEXT,
+  project_id TEXT,
+  ts TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dm_messages_bot ON dm_messages(bot_id, id);
 `;
 
 function nowIso() {
@@ -163,6 +185,7 @@ export class Store {
     };
     // 房间级设置（disabled_toolsets / context budget …），JSON。
     addColumn("rooms", "settings_json", "settings_json TEXT");
+    addColumn("rooms", "project_id", "project_id TEXT");
     // 遥测指标与缓存 Token 统计
     addColumn("usage", "ttft_ms", "ttft_ms INTEGER NOT NULL DEFAULT 0");
     addColumn("usage", "tps", "tps REAL NOT NULL DEFAULT 0.0");
@@ -172,6 +195,7 @@ export class Store {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_room ON usage(room_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_bot ON usage(bot_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_dm_messages_bot ON dm_messages(bot_id, id)");
   }
 
   close() {
@@ -238,6 +262,7 @@ export class Store {
       context_policy: row.context_policy || "shared",
       status: row.status || "active",
       settings: parseJson(row.settings_json, {}) || {},
+      project_id: row.project_id || null,
       created_at: row.created_at || "",
       updated_at: row.updated_at || "",
     };
@@ -255,14 +280,18 @@ export class Store {
     if (!room || !room.room_id) throw new Error("room.room_id is required");
     const ts = nowIso();
     const existing = this.getRoom(room.room_id);
+    const projectId = room.project_id !== undefined
+      ? (room.project_id ? String(room.project_id) : null)
+      : (existing?.project_id ?? null);
     this.prepare(
-      `INSERT INTO rooms(room_id,title,owner_id,parent_room_id,topic,context_policy,status,settings_json,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO rooms(room_id,title,owner_id,parent_room_id,topic,context_policy,status,settings_json,project_id,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(room_id) DO UPDATE SET
          title = excluded.title, owner_id = excluded.owner_id,
          parent_room_id = excluded.parent_room_id, topic = excluded.topic,
          context_policy = excluded.context_policy, status = excluded.status,
          settings_json = excluded.settings_json,
+         project_id = excluded.project_id,
          updated_at = excluded.updated_at`,
     ).run(
       String(room.room_id),
@@ -273,6 +302,7 @@ export class Store {
       String(room.context_policy ?? "shared"),
       String(room.status ?? "active"),
       room.settings && typeof room.settings === "object" ? json(room.settings) : null,
+      projectId,
       room.created_at || existing?.created_at || ts,
       room.updated_at || ts,
     );
@@ -690,6 +720,177 @@ export class Store {
       .all(Math.max(1, Number(limit) || 50))
       .map((r) => parseJson(r.data, null))
       .filter(Boolean);
+  }
+
+  /* ------------------------------------------------------------- projects */
+
+  _projectFromRow(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name || "",
+      root_path: row.root_path || "",
+      description: row.description || "",
+      created_at: row.created_at || "",
+      updated_at: row.updated_at || "",
+      last_opened_at: row.last_opened_at || "",
+    };
+  }
+
+  listProjects() {
+    return this.prepare(
+      "SELECT * FROM projects ORDER BY COALESCE(last_opened_at, updated_at, created_at) DESC, created_at DESC",
+    )
+      .all()
+      .map((r) => this._projectFromRow(r));
+  }
+
+  getProject(id) {
+    if (!id) return null;
+    return this._projectFromRow(this.prepare("SELECT * FROM projects WHERE id = ?").get(String(id)));
+  }
+
+  createProject({ id = null, name, root_path, description = "" } = {}) {
+    if (!root_path) throw new Error("project.root_path is required");
+    const ts = nowIso();
+    const pid = id ? String(id) : `proj_${makeId(4)}`;
+    const cleanName = String(name || "").trim() || path.basename(String(root_path)) || pid;
+    this.prepare(
+      `INSERT INTO projects(id, name, root_path, description, created_at, updated_at, last_opened_at)
+       VALUES(?,?,?,?,?,?,?)`,
+    ).run(pid, cleanName, String(root_path), String(description || ""), ts, ts, ts);
+    return this.getProject(pid);
+  }
+
+  updateProject(id, patch = {}) {
+    const existing = this.getProject(id);
+    if (!existing) return null;
+    const next = {
+      ...existing,
+      name: typeof patch.name === "string" && patch.name.trim() ? patch.name.trim() : existing.name,
+      root_path: typeof patch.root_path === "string" && patch.root_path.trim() ? patch.root_path.trim() : existing.root_path,
+      description: typeof patch.description === "string" ? patch.description : existing.description,
+      updated_at: nowIso(),
+      last_opened_at: patch.last_opened_at || existing.last_opened_at || nowIso(),
+    };
+    this.prepare(
+      "UPDATE projects SET name = ?, root_path = ?, description = ?, updated_at = ?, last_opened_at = ? WHERE id = ?",
+    ).run(next.name, next.root_path, next.description, next.updated_at, next.last_opened_at, String(id));
+    return this.getProject(id);
+  }
+
+  deleteProject(id) {
+    const pid = String(id);
+    this.prepare("DELETE FROM projects WHERE id = ?").run(pid);
+    this.prepare("UPDATE rooms SET project_id = NULL WHERE project_id = ?").run(pid);
+    if (this.getActiveProjectId() === pid) {
+      const remaining = this.listProjects();
+      this.setActiveProjectId(remaining[0]?.id || null);
+    }
+    return true;
+  }
+
+  getActiveProjectId() {
+    const val = this.getKV("active_project_id", null);
+    return val ? String(val) : null;
+  }
+
+  setActiveProjectId(id) {
+    const clean = id ? String(id) : null;
+    this.setKV("active_project_id", clean);
+    if (clean) {
+      try {
+        this.prepare("UPDATE projects SET last_opened_at = ? WHERE id = ?").run(nowIso(), clean);
+      } catch {
+        /* ignore */
+      }
+    }
+    return clean;
+  }
+
+  /* ---------------------------------------------------------- dm messages */
+
+  _dmFromRow(row) {
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      bot_id: row.bot_id,
+      speaker: row.speaker,
+      content: row.content || "",
+      tools: parseJson(row.tools_json, []) || [],
+      telemetry: parseJson(row.telemetry_json, null),
+      model: row.model || "",
+      project_id: row.project_id || null,
+      ts: row.ts || "",
+    };
+  }
+
+  appendDmMessage(botId, { speaker, content, tools = [], telemetry = null, model = "", project_id = null, ts = null } = {}) {
+    const id = String(botId || "").trim();
+    if (!id) throw new Error("bot_id is required");
+    const stamp = ts || nowIso();
+    const info = this.prepare(
+      `INSERT INTO dm_messages(bot_id, speaker, content, tools_json, telemetry_json, model, project_id, ts)
+       VALUES(?,?,?,?,?,?,?,?)`,
+    ).run(
+      id,
+      String(speaker || "user"),
+      String(content ?? ""),
+      Array.isArray(tools) && tools.length ? json(tools) : null,
+      telemetry && typeof telemetry === "object" ? json(telemetry) : null,
+      model ? String(model) : null,
+      project_id ? String(project_id) : null,
+      stamp,
+    );
+    return this._dmFromRow(this.prepare("SELECT * FROM dm_messages WHERE id = ?").get(Number(info.lastInsertRowid)));
+  }
+
+  listDmMessages(botId, limit = 200) {
+    const id = String(botId || "").trim();
+    const max = Math.max(1, Math.min(Number(limit) || 200, 2000));
+    const rows = this.prepare(`
+      SELECT * FROM (
+        SELECT * FROM dm_messages WHERE bot_id = ? ORDER BY id DESC LIMIT ?
+      ) ORDER BY id ASC
+    `).all(id, max);
+    return rows.map((r) => this._dmFromRow(r));
+  }
+
+  clearDmMessages(botId) {
+    const id = String(botId || "").trim();
+    const info = this.prepare("DELETE FROM dm_messages WHERE bot_id = ?").run(id);
+    return Number(info?.changes || 0);
+  }
+
+  listDmSummaries() {
+    const rows = this.prepare(`
+      SELECT m.bot_id,
+             COUNT(*) AS message_count,
+             MAX(m.id) AS last_id
+        FROM dm_messages m
+       GROUP BY m.bot_id
+    `).all();
+    return rows.map((r) => {
+      const last = this.prepare("SELECT speaker, content, ts FROM dm_messages WHERE id = ?").get(Number(r.last_id));
+      return {
+        bot_id: r.bot_id,
+        message_count: Number(r.message_count || 0),
+        last_speaker: last?.speaker || "",
+        last_content: last?.content || "",
+        last_ts: last?.ts || null,
+      };
+    });
+  }
+
+  getDmProjectId(botId) {
+    const val = this.getKV(`dm.project.${String(botId || "").trim()}`, null);
+    return val ? String(val) : null;
+  }
+
+  setDmProjectId(botId, projectId) {
+    const clean = projectId ? String(projectId) : null;
+    this.setKV(`dm.project.${String(botId || "").trim()}`, clean);
+    return clean;
   }
 }
 

@@ -17,6 +17,7 @@ import {
 
 export const NAV = [
   { id: "general", label: "通用", icon: ICONS.settings },
+  { id: "perf", label: "性能监控", icon: ICONS.activity },
   { id: "approvals", label: "审批", icon: ICONS.bell },
   { id: "skills", label: "技能与提案", icon: ICONS.tool },
   { id: "memory", label: "记忆", icon: ICONS.spark },
@@ -56,11 +57,45 @@ let escHandler = null;
 let modelFilterQuery = "";
 let memoryViewState = { loaded: false, loading: false, query: "", entries: [], stats: null, results: null, error: "" };
 
+let perfPollTimer = null;
+let perfChartsModPromise = null;
+let perfChartsMod = null;
+let perfMountEl = null;
+let perfState = {
+  paused: false,
+  loading: false,
+  error: "",
+  data: null,
+};
+
+function stopPerfMonitor() {
+  if (perfPollTimer) {
+    clearInterval(perfPollTimer);
+    perfPollTimer = null;
+  }
+  if (perfMountEl && perfChartsMod?.unmountPerfCharts) {
+    perfChartsMod.unmountPerfCharts(perfMountEl);
+  }
+  perfMountEl = null;
+}
+
+function loadPerfChartsModule() {
+  if (perfChartsMod) return Promise.resolve(perfChartsMod);
+  if (!perfChartsModPromise) {
+    perfChartsModPromise = import("/static/js/perf_charts.bundle.js").then((mod) => {
+      perfChartsMod = mod;
+      return mod;
+    });
+  }
+  return perfChartsModPromise;
+}
+
 export function openSettings(opts = {}) {
   closeSettings();
   let rawTab = opts.tab || "general";
   if (rawTab === "capabilities" || rawTab === "proposals") rawTab = "skills";
   if (rawTab === "telemetry") rawTab = "usage";
+  if (rawTab === "performance") rawTab = "perf";
   let tab = rawTab;
   let selectedBot = opts.botId || "ChiefRouter";
 
@@ -72,6 +107,7 @@ export function openSettings(opts = {}) {
   const shell = backdrop.querySelector(".settings-modal");
 
   const close = () => {
+    stopPerfMonitor();
     state.skillProposals.open = false;
     if (escHandler) document.removeEventListener("keydown", escHandler);
     escHandler = null;
@@ -120,6 +156,7 @@ export function openSettings(opts = {}) {
   };
 
   const render = () => {
+    stopPerfMonitor();
     state.skillProposals.open = tab === "skills";
     const content = contentFor(tab, selectedBot, { close, rerender: render, setTab: (t) => { tab = t; render(); }, setBot: (id) => { selectedBot = id; render(); } });
     const pending = pendingApprovalCount();
@@ -150,6 +187,7 @@ export function openSettings(opts = {}) {
 }
 
 export function closeSettings() {
+  stopPerfMonitor();
   document.querySelectorAll(".modal-backdrop").forEach((el) => {
     if (el.querySelector(".settings-modal")) {
       el.style.pointerEvents = "none";
@@ -166,6 +204,7 @@ function header(title, sub) {
 
 function contentFor(tab, selectedBot, ctx) {
   if (tab === "general") return generalTab();
+  if (tab === "perf") return perfTab();
   if (tab === "approvals") return approvalsTab();
   if (tab === "skills") return skillsTab();
   if (tab === "memory") return memoryTab();
@@ -386,6 +425,89 @@ function generalTab() {
               <button data-theme-val="light" class="${state.theme === "light" ? "is-on" : ""}">浅色</button>
               <button data-theme-val="dark" class="${state.theme === "dark" ? "is-on" : ""}">深色</button>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function formatUptime(ms) {
+  const sec = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function perfTab() {
+  const d = perfState.data || {};
+  const cur = d.current || {};
+  const sum = d.summary || {};
+  const sys = d.system || {};
+  const memPct = Number(cur.mem_pct || 0).toFixed(1);
+  const memDetail = cur.mem_total_mb
+    ? `${Math.round(cur.mem_used_mb || 0)} / ${Math.round(cur.mem_total_mb)} MB`
+    : "正在采样…";
+  const rssMb = Number(cur.proc_rss_mb || 0).toFixed(1);
+  const heapDetail = cur.heap_total_mb
+    ? `V8 堆 ${Number(cur.heap_used_mb || 0).toFixed(1)} / ${Number(cur.heap_total_mb).toFixed(0)} MB`
+    : "Node 进程驻留内存";
+  const tpsVal = Number(cur.tps || 0).toFixed(1);
+  const tpsSub = `均值 ${Number(sum.avg_tps || 0).toFixed(1)} · 峰值 ${Number(sum.peak_tps || 0).toFixed(1)} tok/s`;
+  const ttftVal = Math.round(sum.avg_ttft_ms || cur.ttft_ms || 0);
+
+  return `
+    ${header("性能监控", "实时系统内存消耗、Node 进程占用与 Token 处理速度（Recharts）")}
+    <div class="settings-body">
+      <div class="perf-toolbar">
+        <div class="perf-live-badge${perfState.paused ? " is-paused" : ""}" id="perf-live-badge">
+          <span class="perf-live-dot"></span>
+          <span id="perf-live-text">${perfState.paused ? "已暂停采样" : "每 2 秒实时采样"}</span>
+        </div>
+        <span class="spacer"></span>
+        <button class="btn sm" type="button" id="perf-pause-btn">${perfState.paused ? "恢复监控" : "暂停"}</button>
+        <button class="btn sm" type="button" id="perf-refresh-btn">${ICONS.refresh} 立即采样</button>
+      </div>
+
+      ${perfState.error ? `<div class="appr-error" id="perf-error">性能采集失败：${escapeHtml(perfState.error)}</div>` : `<div class="appr-error" id="perf-error" hidden></div>`}
+
+      <div class="stat-grid perf-kpi-grid">
+        <div class="stat-card">
+          <div class="stat-label">系统内存使用率</div>
+          <div class="stat-value"><span id="perf-kpi-mem">${memPct}</span><small>%</small></div>
+          <div class="stat-sub" id="perf-kpi-mem-sub">${escapeHtml(memDetail)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">进程驻留内存 (RSS)</div>
+          <div class="stat-value"><span id="perf-kpi-rss">${rssMb}</span><small>MB</small></div>
+          <div class="stat-sub" id="perf-kpi-rss-sub">${escapeHtml(heapDetail)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Token 处理速度</div>
+          <div class="stat-value"><span id="perf-kpi-tps">${tpsVal}</span><small>tok/s</small></div>
+          <div class="stat-sub" id="perf-kpi-tps-sub">${escapeHtml(tpsSub)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">平均首字延迟</div>
+          <div class="stat-value"><span id="perf-kpi-ttft">${ttftVal}</span><small>ms</small></div>
+          <div class="stat-sub" id="perf-kpi-turns-sub">${Number(sum.active_turns || 0)} 路活跃 · 累计 ${formatTokens(sum.total_tokens || 0)} tok</div>
+        </div>
+      </div>
+
+      <div class="perf-charts-host" id="perf-charts-root">
+        <div class="empty-mini">正在初始化 Recharts 实时图表…</div>
+      </div>
+
+      <div class="settings-section">
+        <h3>运行环境</h3>
+        <div class="set-card">
+          <div class="engine-grid perf-sys-grid">
+            <div class="engine-kv"><div class="k">运行平台</div><div class="v is-text" id="perf-sys-platform">${escapeHtml(sys.platform ? `${sys.platform} (${sys.arch || ""})` : "检测中…")}</div></div>
+            <div class="engine-kv"><div class="k">Node 运行时</div><div class="v" id="perf-sys-node">${escapeHtml(sys.node_version || "-")}</div></div>
+            <div class="engine-kv"><div class="k">CPU 核心 / 1m 负载</div><div class="v" id="perf-sys-cpu">${sys.cpu_count ? `${sys.cpu_count} 核 · ${Number(cur.cpu_load_1m || 0).toFixed(2)}` : "-"}</div></div>
+            <div class="engine-kv"><div class="k">服务已运行</div><div class="v" id="perf-sys-uptime">${sys.uptime_ms ? formatUptime(sys.uptime_ms) : "-"}</div></div>
           </div>
         </div>
       </div>
@@ -840,6 +962,84 @@ function aboutTab() {
 }
 
 function bindContent(root, ctx) {
+  if (ctx.tab === "perf") {
+    const chartsHost = $("#perf-charts-root", root);
+    perfMountEl = chartsHost;
+
+    const patchDom = (data) => {
+      if (!data || !root.isConnected) return;
+      const cur = data.current || {};
+      const sum = data.summary || {};
+      const sys = data.system || {};
+      const setTxt = (sel, val) => { const el = $(sel, root); if (el) el.textContent = String(val); };
+      setTxt("#perf-kpi-mem", Number(cur.mem_pct || 0).toFixed(1));
+      setTxt("#perf-kpi-mem-sub", cur.mem_total_mb ? `${Math.round(cur.mem_used_mb || 0)} / ${Math.round(cur.mem_total_mb)} MB` : "采样中…");
+      setTxt("#perf-kpi-rss", Number(cur.proc_rss_mb || 0).toFixed(1));
+      setTxt("#perf-kpi-rss-sub", cur.heap_total_mb ? `V8 堆 ${Number(cur.heap_used_mb || 0).toFixed(1)} / ${Number(cur.heap_total_mb).toFixed(0)} MB` : "Node 进程驻留内存");
+      setTxt("#perf-kpi-tps", Number(cur.tps || 0).toFixed(1));
+      setTxt("#perf-kpi-tps-sub", `均值 ${Number(sum.avg_tps || 0).toFixed(1)} · 峰值 ${Number(sum.peak_tps || 0).toFixed(1)} tok/s`);
+      setTxt("#perf-kpi-ttft", Math.round(sum.avg_ttft_ms || cur.ttft_ms || 0));
+      setTxt("#perf-kpi-turns-sub", `${Number(sum.active_turns || 0)} 路活跃 · 累计 ${formatTokens(sum.total_tokens || 0)} tok`);
+      setTxt("#perf-sys-platform", `${sys.platform || ""} (${sys.arch || ""})`);
+      setTxt("#perf-sys-node", sys.node_version || "-");
+      setTxt("#perf-sys-cpu", `${sys.cpu_count || 1} 核 · ${Number(cur.cpu_load_1m || 0).toFixed(2)}`);
+      setTxt("#perf-sys-uptime", formatUptime(sys.uptime_ms || 0));
+
+      const errEl = $("#perf-error", root);
+      if (errEl) {
+        errEl.hidden = !perfState.error;
+        if (perfState.error) errEl.textContent = `性能采集失败：${perfState.error}`;
+      }
+
+      if (chartsHost && chartsHost.isConnected && perfChartsMod?.mountPerfCharts) {
+        perfChartsMod.mountPerfCharts(chartsHost, {
+          history: data.history || [],
+          current: cur,
+          summary: sum,
+          theme: document.documentElement.getAttribute("data-theme") || state.theme || "light",
+        });
+      }
+    };
+
+    const pollOnce = async () => {
+      if (!root.isConnected) {
+        stopPerfMonitor();
+        return;
+      }
+      try {
+        const [data] = await Promise.all([api.perf(), loadPerfChartsModule()]);
+        perfState.data = data;
+        perfState.error = "";
+        patchDom(data);
+      } catch (err) {
+        perfState.error = err?.message || "无法获取性能数据";
+        const errEl = $("#perf-error", root);
+        if (errEl) {
+          errEl.hidden = false;
+          errEl.textContent = `性能采集失败：${perfState.error}`;
+        }
+      }
+    };
+
+    $("#perf-pause-btn", root)?.addEventListener("click", (ev) => {
+      perfState.paused = !perfState.paused;
+      ev.currentTarget.textContent = perfState.paused ? "恢复监控" : "暂停";
+      const badge = $("#perf-live-badge", root);
+      const txt = $("#perf-live-text", root);
+      badge?.classList.toggle("is-paused", perfState.paused);
+      if (txt) txt.textContent = perfState.paused ? "已暂停采样" : "每 2 秒实时采样";
+      if (!perfState.paused) pollOnce();
+    });
+
+    $("#perf-refresh-btn", root)?.addEventListener("click", () => pollOnce());
+
+    pollOnce();
+    perfPollTimer = setInterval(() => {
+      if (!perfState.paused && !document.hidden) pollOnce();
+    }, 2000);
+    return;
+  }
+
   if (ctx.tab === "general") {
     $("#open-data", root)?.addEventListener("click", () => window.harnessWindow?.openDataDir?.());
     $("#open-log", root)?.addEventListener("click", () => window.harnessWindow?.openLog?.());

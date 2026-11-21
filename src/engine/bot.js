@@ -115,6 +115,7 @@ export class BotRunner {
     this.onApprovalResolved = typeof options.onApprovalResolved === "function" ? options.onApprovalResolved : null;
     this.skills = options.skills || null;
     this.roomContext = options.roomContext || {};
+    this._cwdOverride = options.cwd ? String(options.cwd).trim() : null;
     this.customTools = Array.isArray(options.customTools) ? [...options.customTools] : [];
     this.roomTools = Array.isArray(this.bot.room_tools) ? [...this.bot.room_tools] : [];
     this.readOnly = options.readOnly !== undefined ? Boolean(options.readOnly) : Boolean(this.bot.read_only);
@@ -167,10 +168,22 @@ export class BotRunner {
     return this.roomId ? `room:${this.roomId}` : `bot:${this.botId}`;
   }
 
-  /** Workspace directory for this bot in this room. */
+  /** Workspace directory for this bot (project override if bound, else room/solo workspace). */
   get cwd() {
+    if (this._cwdOverride) {
+      return assertNotC(path.resolve(this._cwdOverride), "project workspace");
+    }
     const base = this.roomId ? path.join(DIRS.workspace, "rooms", this.roomId) : path.join(DIRS.workspace, "solo");
     return assertNotC(path.join(base, this.botId), "bot workspace");
+  }
+
+  /** Switch the bot's working directory (e.g. when switching bound Project); resets live session if changed. */
+  setCwd(nextCwd) {
+    const clean = nextCwd ? path.resolve(String(nextCwd).trim()) : null;
+    if (clean === this._cwdOverride) return false;
+    this._cwdOverride = clean;
+    if (this.session) this.resetSession();
+    return true;
   }
 
   /** Absolute path of the bot's pi agent dir (shared, D: only). */
@@ -263,14 +276,15 @@ export class BotRunner {
     ensureDirs();
     const cwd = this.cwd;
     fs.mkdirSync(cwd, { recursive: true });
-    // 把压缩策略写进项目级 `.pi/settings.json`（pi 会与全局 settings 合并）。
-    // 为什么在会话创建前写：pi 在 createAgentSession 时读取 settings；中途改不会生效。
-    try {
-      const settingsDir = assertNotC(path.join(cwd, ".pi"), "bot pi settings");
-      fs.mkdirSync(settingsDir, { recursive: true });
-      fs.writeFileSync(path.join(settingsDir, "settings.json"), `${JSON.stringify(piProjectSettings(), null, 2)}\n`, "utf8");
-    } catch (err) {
-      log.warn("write project pi settings failed", err?.message || err);
+    // 把压缩策略写进内部工作区的 `.pi/settings.json`；绑定外部用户项目目录时不污染用户仓库。
+    if (!this._cwdOverride) {
+      try {
+        const settingsDir = assertNotC(path.join(cwd, ".pi"), "bot pi settings");
+        fs.mkdirSync(settingsDir, { recursive: true });
+        fs.writeFileSync(path.join(settingsDir, "settings.json"), `${JSON.stringify(piProjectSettings(), null, 2)}\n`, "utf8");
+      } catch (err) {
+        log.warn("write project pi settings failed", err?.message || err);
+      }
     }
 
     const model = this.engine?.getModel?.(this.bot.model) || this.engine?.defaultModel;

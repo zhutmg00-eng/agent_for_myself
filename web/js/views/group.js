@@ -5,6 +5,7 @@ import {
   state, subscribe, openRoom, sendRoomMessage, refreshFiles, updateRoomMeta,
   activeMembers, roomTitle, childRooms, profileOf, uploadAvatar, resetAvatar,
   memberIdentity, refreshEvidence, evidenceSummaryOf, updateBotModel, refreshModels,
+  activeProject, projectById,
 } from "../store.js";
 import { avatar, groupAvatar, userAvatar, profileFor, escapeHtml, customAvatarUrl, roleIconSvg } from "../avatars.js";
 import {
@@ -1337,7 +1338,18 @@ function membersTabHTML(room, members, activeMember = null) {
   };
   const defaultModel = state.settings?.model || state.health?.model || "";
   const catalog = state.models || [];
+  const roomProj = room.project_id ? projectById(room.project_id) : null;
+  const globalProj = activeProject();
+  const projects = state.projects || [];
   return `
+    <div class="section-label">绑定项目目录 <span class="count">${escapeHtml((roomProj || globalProj)?.name || "默认")}</span></div>
+    <div class="room-proj-bar">
+      <select class="select" data-room-project aria-label="群聊绑定项目目录">
+        <option value=""${!room.project_id ? " selected" : ""}>跟随全局 (${escapeHtml(globalProj?.name || "默认工作区")})</option>
+        ${projects.map((pr) => `<option value="${escapeAttr(pr.id)}"${room.project_id === pr.id ? " selected" : ""}>${escapeHtml(pr.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="seg-hint is-mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeAttr((roomProj || globalProj)?.root_path || "")}">${escapeHtml((roomProj || globalProj)?.root_path || "使用默认工作区")}</div>
     <div class="section-label">上下文共享 <span class="count">${escapeHtml(POLICY_LABEL[room.context_policy] || "")}</span></div>
     <div class="seg" data-policy>
       ${["shared", "summary", "isolated"].map((p) => `<button data-policy-val="${p}" class="${room.context_policy === p ? "is-on" : ""}">${POLICY_LABEL[p]}</button>`).join("")}
@@ -1496,6 +1508,20 @@ export function bindGroupInspector(root, roomId, tab = "members", rerender, sele
       state.inspector = { type: "group", id: roomId, tab: btn.dataset.tab };
       document.dispatchEvent(new CustomEvent("ah:inspector", { detail: state.inspector }));
     });
+  });
+  $("[data-room-project]", root)?.addEventListener("change", async (ev) => {
+    const sel = ev.currentTarget;
+    const nextProjId = sel.value || null;
+    sel.disabled = true;
+    try {
+      await updateRoomMeta(roomId, { project_id: nextProjId });
+      const target = nextProjId ? projectById(nextProjId) : activeProject();
+      toast(`群聊工作目录已切换至「${target?.name || "全局默认"}」`, "success");
+      rerender();
+    } catch (err) {
+      sel.disabled = false;
+      toast(`切换项目失败：${err.message}`, "error");
+    }
   });
   $$("[data-policy-val]", root).forEach((btn) => {
     btn.addEventListener("click", async () => {

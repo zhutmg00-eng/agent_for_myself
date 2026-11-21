@@ -425,9 +425,9 @@ describe("Milestone 2: Frontend Architecture & Layout Shell Test Suite", () => {
   });
 
   describe("Suite 4: Modern Multi-Tab Settings Modal & Pointer-Events Isolation", () => {
-    it("4.1: NAV defines 7 unified tabs with correct IDs and localized labels", () => {
-      assert.equal(NAV.length, 7, "NAV must contain 7 tabs");
-      const expectedIds = ["general", "approvals", "skills", "memory", "usage", "bots", "about"];
+    it("4.1: NAV defines 8 unified tabs including perf monitor with correct IDs and localized labels", () => {
+      assert.equal(NAV.length, 8, "NAV must contain 8 tabs");
+      const expectedIds = ["general", "perf", "approvals", "skills", "memory", "usage", "bots", "about"];
       assert.deepEqual(NAV.map((n) => n.id), expectedIds);
     });
 

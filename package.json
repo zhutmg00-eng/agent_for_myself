@@ -23,7 +23,11 @@
     "gateway": "http://127.0.0.1:3425/v1"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.0"
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "esbuild": "^0.28.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "recharts": "^3.11.0"
   },
   "devDependencies": {}
 }

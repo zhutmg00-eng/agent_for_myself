@@ -58,8 +58,14 @@ export const state = {
     open: false,
   },
   automation: null,
+  projects: [],
+  activeProjectId: null,
+  dms: {},               // botId -> { bot_id, message_count, last_content, last_ts, project_id, busy }
+  dmMessages: {},        // botId -> message[]
+  dmActivity: {},        // botId -> { busy, streamText, tools: [] }
+  dmProjects: {},        // botId -> projectId|null
   theme: localStorage.getItem("ah-theme") || "light",
-  inspector: null,       // { type: 'group'|'bot'|'usage', id }
+  inspector: null,       // { type: 'group'|'bot'|'usage'|'project', id }
 };
 
 export function subscribe(fn) {
@@ -90,8 +96,8 @@ export async function boot() {
   applyTheme();
   state.roomsLoading = true;
   try {
-    const [bots, rooms, settings, models, skills, hooks, context, stats, avatars, health, approvals, automation] = await Promise.allSettled([
-      api.bots(), api.rooms(), api.settings(), api.models(), api.skills(), api.hooks(), api.context(), api.stats(), api.avatars(), api.health(), api.approvals(), api.automationStatus(),
+    const [bots, rooms, settings, models, skills, hooks, context, stats, avatars, health, approvals, automation, projects, dms] = await Promise.allSettled([
+      api.bots(), api.rooms(), api.settings(), api.models(), api.skills(), api.hooks(), api.context(), api.stats(), api.avatars(), api.health(), api.approvals(), api.automationStatus(), api.projects(), api.dms(),
     ]);
     if (bots.status === "fulfilled") setBots(bots.value.bots || []);
     if (rooms.status === "fulfilled") setRooms(rooms.value.rooms || []);
@@ -104,6 +110,8 @@ export async function boot() {
     if (stats.status === "fulfilled") state.stats = stats.value;
     if (approvals.status === "fulfilled") applyApprovalsPayload(approvals.value);
     if (automation.status === "fulfilled") state.automation = automation.value;
+    if (projects.status === "fulfilled") setProjects(projects.value?.projects || [], projects.value?.active_project_id || null);
+    if (dms.status === "fulfilled") setDms(dms.value?.dms || []);
     if (avatars.status === "fulfilled") {
       state.avatars = avatars.value.avatars || {};
       setCustomAvatars(state.avatars);
@@ -146,6 +154,7 @@ export function normalizeRoom(raw) {
     topic: String(raw.topic || ""),
     owner_id: raw.owner_id || null,
     parent_room_id: raw.parent_room_id || null,
+    project_id: raw.project_id || null,
     context_policy: ["shared", "summary", "isolated"].includes(raw.context_policy) ? raw.context_policy : "shared",
     status: raw.status || "active",
     members,
@@ -269,6 +278,180 @@ export async function setAutomationKill(stopped = true) {
   }
   emit();
   return res;
+}
+
+/* --------------------------------------------------------------- projects */
+
+function setProjects(list, activeId) {
+  state.projects = Array.isArray(list) ? list : [];
+  if (activeId !== undefined) {
+    state.activeProjectId = activeId || (state.projects[0]?.id || null);
+  } else if (!state.activeProjectId && state.projects.length) {
+    state.activeProjectId = state.projects[0].id;
+  }
+}
+
+export function projectById(id) {
+  if (!id) return null;
+  return (state.projects || []).find((p) => p.id === id) || null;
+}
+
+export function activeProject() {
+  return projectById(state.activeProjectId) || (state.projects || [])[0] || null;
+}
+
+export async function refreshProjects() {
+  const data = await api.projects();
+  setProjects(data?.projects || [], data?.active_project_id || null);
+  emit();
+  return state.projects;
+}
+
+export async function createProject(payload) {
+  const res = await api.createProject(payload);
+  await refreshProjects();
+  return res?.project || res;
+}
+
+export async function activateProject(id) {
+  const res = await api.activateProject(id);
+  state.activeProjectId = res?.active_project_id || id;
+  await refreshProjects();
+  return res;
+}
+
+export async function deleteProject(id) {
+  const res = await api.deleteProject(id);
+  if (state.inspector?.type === "project" && state.inspector.id === id) {
+    state.inspector = null;
+  }
+  await refreshProjects();
+  return res;
+}
+
+/* ----------------------------------------------------------- direct chats */
+
+function newDmActivity() {
+  return { busy: false, streamText: "", tools: [] };
+}
+
+export function dmActivityFor(botId) {
+  if (!state.dmActivity[botId]) state.dmActivity[botId] = newDmActivity();
+  return state.dmActivity[botId];
+}
+
+function setDms(list) {
+  const map = {};
+  for (const item of Array.isArray(list) ? list : []) {
+    if (!item?.bot_id) continue;
+    map[item.bot_id] = item;
+    if (item.project_id !== undefined) state.dmProjects[item.bot_id] = item.project_id || null;
+    if (item.busy) {
+      const act = dmActivityFor(item.bot_id);
+      act.busy = true;
+    }
+  }
+  state.dms = map;
+}
+
+export async function refreshDms() {
+  try {
+    const data = await api.dms();
+    setDms(data?.dms || []);
+    emit();
+  } catch { /* non-fatal */ }
+}
+
+export async function loadDm(botId) {
+  if (!botId) return [];
+  const data = await api.dmMessages(botId, 200);
+  const msgs = Array.isArray(data?.messages) ? data.messages : [];
+  state.dmMessages[botId] = msgs;
+  if (data?.project_id !== undefined) {
+    state.dmProjects[botId] = data.project_id || null;
+  }
+  const act = dmActivityFor(botId);
+  act.busy = Boolean(data?.busy);
+  if (msgs.length) {
+    const last = msgs[msgs.length - 1];
+    state.dms[botId] = {
+      ...(state.dms[botId] || { bot_id: botId }),
+      message_count: msgs.length,
+      last_content: last.content,
+      last_ts: last.ts,
+      project_id: state.dmProjects[botId] ?? null,
+    };
+  }
+  emit();
+  return msgs;
+}
+
+export async function sendDmMessage(botId, content, projectId = undefined) {
+  const text = String(content || "").trim();
+  if (!botId || !text) return;
+  if (!state.dmMessages[botId]) state.dmMessages[botId] = [];
+  const act = dmActivityFor(botId);
+  act.busy = true;
+  act.streamText = "";
+  act.tools = [];
+
+  const optimistic = {
+    id: uid("dmu"),
+    bot_id: botId,
+    speaker: "user",
+    content: text,
+    ts: new Date().toISOString(),
+    pending: true,
+  };
+  state.dmMessages[botId].push(optimistic);
+  emit();
+  try {
+    await api.dmSay(botId, text, projectId);
+  } catch (err) {
+    optimistic.pending = false;
+    optimistic.failed = true;
+    act.busy = false;
+    emit();
+    throw err;
+  }
+}
+
+export async function setDmProject(botId, projectId) {
+  const res = await api.dmSetProject(botId, projectId || null);
+  state.dmProjects[botId] = res?.project_id ?? (projectId || null);
+  emit();
+  return res;
+}
+
+export async function clearDm(botId) {
+  await api.dmClear(botId);
+  state.dmMessages[botId] = [];
+  state.dmActivity[botId] = newDmActivity();
+  if (state.dms[botId]) {
+    state.dms[botId] = { ...state.dms[botId], message_count: 0, last_content: "", last_ts: null };
+  }
+  emit();
+}
+
+export async function abortDm(botId) {
+  const res = await api.dmAbort(botId);
+  const act = dmActivityFor(botId);
+  act.busy = false;
+  emit();
+  return res;
+}
+
+export function dmLastPreview(botId) {
+  const list = state.dmMessages[botId];
+  if (Array.isArray(list) && list.length) {
+    const last = list[list.length - 1];
+    return String(last?.content || "").replace(/\s+/g, " ").slice(0, 48);
+  }
+  const summary = state.dms?.[botId];
+  if (summary?.last_content) {
+    return String(summary.last_content).replace(/\s+/g, " ").slice(0, 48);
+  }
+  return "";
 }
 
 export async function refreshContext() {
@@ -632,8 +815,9 @@ export function openChief() {
 
 export function openBot(botId) {
   state.view = { type: "bot", id: botId };
-  state.inspector = null;
+  if (state.inspector?.type === "group") state.inspector = null;
   emit();
+  loadDm(botId).catch(() => {});
 }
 
 export function toggleInspector(type, id) {
@@ -826,6 +1010,142 @@ export function applyEvent(evt) {
   // 分支之前处理（房间可能还没加载，事件仍然应当被消费掉）。
   if (/^room\.[^.]+\.skill_proposed$/.test(topic)) {
     if (state.skillProposals?.open) scheduleSkillProposalsRefresh(400);
+    return;
+  }
+
+  // dm.<botId>.<kind> —— 1v1 私聊实时事件
+  const dmMatch = topic.match(/^dm\.([^.]+)\.([a-zA-Z_]+)$/);
+  if (dmMatch) {
+    const [, botId, kind] = dmMatch;
+    if (!state.dmMessages[botId]) state.dmMessages[botId] = [];
+    const list = state.dmMessages[botId];
+    const act = dmActivityFor(botId);
+
+    switch (kind) {
+      case "user_message": {
+        const body = String(payload?.content ?? "");
+        const stamp = payload?.ts || new Date().toISOString();
+        const pending = [...list].reverse().find((m) => m.speaker === "user" && m.pending && m.content === body);
+        if (pending) {
+          pending.pending = false;
+          pending.id = payload?.id || pending.id;
+          pending.ts = stamp;
+        } else if (!list.some((m) => m.id === payload?.id && payload?.id)) {
+          list.push({
+            id: payload?.id || uid("dmu"),
+            bot_id: botId,
+            speaker: "user",
+            content: body,
+            project_id: payload?.project_id || null,
+            ts: stamp,
+          });
+        }
+        state.dms[botId] = {
+          ...(state.dms[botId] || { bot_id: botId }),
+          message_count: list.length,
+          last_content: body,
+          last_ts: stamp,
+        };
+        changed = true;
+        break;
+      }
+      case "turn_started": {
+        act.busy = true;
+        act.streamText = "";
+        act.tools = [];
+        const bot = state.botsById[botId];
+        if (bot) bot.state = "working";
+        changed = true;
+        break;
+      }
+      case "delta": {
+        act.busy = true;
+        act.streamText += String(payload?.delta || "");
+        changed = true;
+        break;
+      }
+      case "tool_invoked": {
+        act.busy = true;
+        act.tools.push({
+          id: payload?.call_id || uid("dmt"),
+          tool: payload?.tool || "tool",
+          name: payload?.tool || "tool",
+          params: payload?.args || {},
+          args: payload?.args || {},
+          status: "running",
+          state: "running",
+          ts: Date.now(),
+        });
+        changed = true;
+        break;
+      }
+      case "tool_result": {
+        const running = [...act.tools].reverse().find(
+          (t) =>
+            (payload?.call_id ? t.id === payload.call_id : (t.tool === payload?.tool || t.name === payload?.tool)) &&
+            (t.status === "running" || t.state === "running"),
+        );
+        if (running) {
+          running.status = payload?.ok ? "ok" : "error";
+          running.state = payload?.ok ? "success" : "error";
+          running.ok = Boolean(payload?.ok);
+          running.duration = payload?.ms ?? null;
+          running.ms = payload?.ms ?? null;
+          if (payload?.summary) running.output = payload.summary;
+        }
+        changed = true;
+        break;
+      }
+      case "turn_completed": {
+        act.busy = false;
+        const body = String(payload?.content ?? act.streamText ?? "");
+        const tools = Array.isArray(payload?.tools) && payload.tools.length ? payload.tools : [...act.tools];
+        act.streamText = "";
+        act.tools = [];
+        const msgId = payload?.id || uid("dma");
+        if (!list.some((m) => m.id === msgId)) {
+          list.push({
+            id: msgId,
+            bot_id: botId,
+            speaker: botId,
+            content: body,
+            tools,
+            telemetry: payload?.telemetry || null,
+            model: payload?.model || "",
+            project_id: payload?.project_id || null,
+            ts: payload?.ts || new Date().toISOString(),
+          });
+        }
+        state.dms[botId] = {
+          ...(state.dms[botId] || { bot_id: botId }),
+          message_count: list.length,
+          last_content: body,
+          last_ts: payload?.ts || new Date().toISOString(),
+        };
+        const bot = state.botsById[botId];
+        if (bot) bot.state = "idle";
+        refreshContext();
+        changed = true;
+        break;
+      }
+      case "updated": {
+        if (payload?.project_id !== undefined) {
+          state.dmProjects[botId] = payload.project_id || null;
+          changed = true;
+        }
+        break;
+      }
+      case "cleared": {
+        state.dmMessages[botId] = [];
+        state.dmActivity[botId] = newDmActivity();
+        if (state.dms[botId]) {
+          state.dms[botId] = { ...state.dms[botId], message_count: 0, last_content: "", last_ts: null };
+        }
+        changed = true;
+        break;
+      }
+    }
+    if (changed) emit();
     return;
   }
 
@@ -1138,6 +1458,10 @@ export function applyEvent(evt) {
       } else {
         refreshAutomation().catch(() => {});
       }
+      break;
+    }
+    case "harness.projects.updated": {
+      refreshProjects().catch(() => {});
       break;
     }
   }

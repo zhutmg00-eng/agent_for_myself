@@ -4,6 +4,7 @@ import {
   state, boot, subscribe, openRoom, openChief, openBot, createRoom,
   roomLastPreview, roomTitle, profileOf,
   sortedRooms, refreshHealth, pendingApprovalCount, applyTheme,
+  activeProject, dmLastPreview, toggleInspector,
 } from "./store.js";
 import { avatar, groupAvatar, profileFor, escapeHtml, brandMarkSvg } from "./avatars.js";
 import {
@@ -13,6 +14,7 @@ import { ChiefView, chiefInspectorHTML } from "./views/chief.js";
 import { GroupView, groupInspectorHTML, bindGroupInspector } from "./views/group.js";
 import { BotView } from "./views/bot.js";
 import { openSettings } from "./views/settings.js";
+import { openProjectModal, projectInspectorHTML, bindProjectInspector } from "./views/projects.js";
 import { setMentionColorizer } from "./markdown.js";
 import { formatModelShort } from "./models.js";
 
@@ -48,6 +50,10 @@ function cacheEls() {
   els.footUsage = $("#foot-usage");
   els.footModel = $("#foot-model");
   els.approvalBadge = $("#approval-badge");
+  els.btnProjectSwitch = $("#btn-project-switch");
+  els.btnProjectFiles = $("#btn-project-files");
+  els.projSwName = $("#proj-sw-name");
+  els.projSwPath = $("#proj-sw-path");
 }
 
 function initSidebarMode() {
@@ -120,6 +126,16 @@ function bindShell() {
   $("#btn-settings").addEventListener("click", () => openSettings());
   $("#btn-usage").addEventListener("click", () => openSettings({ tab: "usage" }));
   $("#btn-search").addEventListener("click", openSearch);
+  els.btnProjectSwitch?.addEventListener("click", () => openProjectModal());
+  els.btnProjectFiles?.addEventListener("click", () => {
+    const proj = activeProject();
+    if (!proj) {
+      openProjectModal();
+      return;
+    }
+    toggleInspector("project", proj.id);
+    renderInspector(true);
+  });
   els.btnThemeToggle?.addEventListener("click", () => {
     const next = state.theme === "dark" ? "light" : "dark";
     applyTheme(next);
@@ -202,18 +218,37 @@ function renderSidebar() {
   els.chiefCard.querySelector(".chief-name").textContent = chief.name;
   els.chiefCard.querySelector(".chief-role").textContent = chief.role;
 
+  const curProj = activeProject();
+  if (els.projSwName) {
+    els.projSwName.textContent = curProj?.name || "默认工作区";
+  }
+  if (els.projSwPath) {
+    const pathText = curProj?.root_path || state.health?.workspace_root || "点击绑定本地目录";
+    els.projSwPath.textContent = curProj?.git_branch ? `${curProj.git_branch} · ${pathText}` : pathText;
+  }
+  if (els.btnProjectSwitch && curProj) {
+    els.btnProjectSwitch.setAttribute("data-tooltip", `当前项目：${curProj.name} (${curProj.root_path})`);
+    els.btnProjectSwitch.title = `${curProj.name} · ${curProj.root_path}`;
+  }
+  if (els.btnProjectFiles) {
+    const filesOpen = state.inspector?.type === "project";
+    els.btnProjectFiles.classList.toggle("is-active", filesOpen);
+  }
+
   renderRoomList();
 
   const bots = state.bots.filter((b) => b.id !== "ChiefRouter");
   els.botList.innerHTML = bots.map((bot) => {
     const p = profileFor(bot.id, bot);
     const active = state.view.type === "bot" && state.view.id === bot.id;
+    const dmPrev = dmLastPreview(bot.id);
     const rawTag = String(p.tagline || "").trim();
     const cleanedTag = p.role && rawTag.startsWith(`${p.role} · `) ? rawTag.slice(p.role.length + 3) : rawTag;
-    const sub = p.role && p.role !== p.name
+    const roleLine = p.role && p.role !== p.name
       ? (cleanedTag ? `${p.role} · ${cleanedTag}` : p.role)
       : (cleanedTag || p.role || "");
-    return `<button class="bot-row${active ? " is-active" : ""}" data-bot-id="${escapeAttr(bot.id)}" data-tooltip="${escapeAttr(p.name)} · ${escapeAttr(p.role)}" title="${escapeAttr(p.name)}">
+    const sub = dmPrev || roleLine;
+    return `<button class="bot-row${active ? " is-active" : ""}" data-bot-id="${escapeAttr(bot.id)}" data-tooltip="${escapeAttr(p.name)} · 私聊 (${escapeAttr(p.role)})" title="${escapeAttr(p.name)}">
       ${avatar(bot.id, 28)}
       <span class="bot-copy"><span class="bot-name">${escapeHtml(p.name)}</span><span class="bot-sub">${escapeHtml(sub)}</span></span>
       <span class="bot-state${bot.state === "working" ? " working" : ""}"></span>
@@ -302,6 +337,8 @@ function renderInspector(force = false) {
       key,
       title: room.title,
       policy: room.context_policy,
+      project_id: room.project_id || null,
+      projectsSig: (state.projects || []).map((p) => `${p.id}:${p.name}`).join(","),
       perms: room.member_permissions,
       selectedMember: insp.member || null,
       defaultModel: state.settings?.model || state.health?.model || "",
@@ -314,6 +351,8 @@ function renderInspector(force = false) {
     });
   } else if (insp.type === "chief") {
     sig = JSON.stringify({ key, ctx: state.context, stats: state.stats });
+  } else if (insp.type === "project") {
+    sig = JSON.stringify({ key, active: state.activeProjectId, projects: (state.projects || []).map((p) => p.id) });
   }
   if (!force && sig === inspectorSig && key === inspectorKey) return;
 
@@ -327,6 +366,9 @@ function renderInspector(force = false) {
   } else if (insp.type === "chief") {
     els.inspector.innerHTML = chiefInspectorHTML();
     bindInspectorCommon();
+  } else if (insp.type === "project") {
+    els.inspector.innerHTML = projectInspectorHTML(insp.id);
+    bindProjectInspector(els.inspector, insp.id, () => renderInspector(true));
   }
 }
 
@@ -380,6 +422,14 @@ function openNewGroup() {
           <div class="field-hint">群主 Boss 与文件管家 Librarian 已固定加入，无需手动勾选。</div>
         </div>
         <div class="field">
+          <label for="ng-project">绑定项目目录</label>
+          <select class="select" id="ng-project">
+            <option value="">跟随当前全局项目（${escapeHtml(activeProject()?.name || "默认工作区")}）</option>
+            ${(state.projects || []).map((pr) => `<option value="${escapeAttr(pr.id)}"${pr.id === state.activeProjectId ? " selected" : ""}>${escapeHtml(pr.name)} · ${escapeHtml(pr.root_path)}</option>`).join("")}
+          </select>
+          <div class="field-hint">群内成员的文件读写与终端命令将默认在绑定目录中执行。</div>
+        </div>
+        <div class="field">
           <label>上下文共享策略</label>
           <div class="seg" id="ng-policy">
             <button type="button" data-policy="shared" class="is-on">共享全文</button>
@@ -417,6 +467,7 @@ function openNewGroup() {
       });
       const submitCreate = async () => {
         const title = $("#ng-title", root).value.trim() || "新群聊";
+        const projectId = $("#ng-project", root)?.value || null;
         const btn = $("#ng-create", root);
         btn.disabled = true;
         try {
@@ -426,6 +477,7 @@ function openNewGroup() {
             owner_id: "boss",
             title,
             context_policy: policy,
+            ...(projectId ? { project_id: projectId } : {}),
           });
           if (!roomId) throw new Error("后端没有返回房间号");
           closeModal();

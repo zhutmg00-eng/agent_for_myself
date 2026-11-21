@@ -67,6 +67,22 @@
       </div>
 
       <div class="side-scroll" id="side-scroll">
+        <div class="project-switcher" id="project-switcher">
+          <button class="proj-sw-main" id="btn-project-switch" type="button" data-tooltip="切换或管理项目目录" title="切换或管理项目目录">
+            <span class="proj-sw-ico" aria-hidden="true">
+              <svg viewBox="0 0 20 20"><path d="M3 6.2A1.4 1.4 0 0 1 4.4 4.8h3.1l1.4 1.6h6.4a1.4 1.4 0 0 1 1.4 1.4v1H5.2a1.4 1.4 0 0 0-1.3 1l-1 4.8V6.2Z"/><path d="M3.2 15.2 4.4 9.8A1.2 1.2 0 0 1 5.6 8.8h11.1a1 1 0 0 1 1 1.2l-1.1 4.4a1.4 1.4 0 0 1-1.4 1.1H4.1a.9.9 0 0 1-.9-.3Z"/></svg>
+            </span>
+            <span class="proj-sw-copy">
+              <span class="proj-sw-kicker">当前项目</span>
+              <span class="proj-sw-name" id="proj-sw-name">默认工作区</span>
+              <span class="proj-sw-path" id="proj-sw-path">点击绑定本地目录</span>
+            </span>
+          </button>
+          <button class="proj-sw-files" id="btn-project-files" type="button" title="浏览当前项目文件" aria-label="浏览项目文件">
+            <svg viewBox="0 0 20 20"><path d="M5.2 3.5h6.2l3.4 3.4v9.6H5.2Z"/><path d="M11.4 3.7v3.4H14.7"/></svg>
+          </button>
+        </div>
+
         <section class="side-sec">
           <header class="side-sec-head">
             <span class="sec-label">群聊</span>
@@ -79,7 +95,7 @@
         </section>
 
         <section class="side-sec">
-          <header class="side-sec-head"><span class="sec-label">团队成员</span></header>
+          <header class="side-sec-head"><span class="sec-label">私聊 · 成员</span></header>
           <div class="bot-list" id="bot-list"></div>
         </section>
       </div>

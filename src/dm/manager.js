@@ -56,6 +56,8 @@ export class DirectChatManager {
     this._activeControllers = new Map();
     /** @type {Set<string>} */
     this._busy = new Set();
+    /** @type {Map<string, string>} last injected project+branch signature per DM session (`dsh` delta-facts) */
+    this._lastProjectSig = new Map();
   }
 
   _botRecord(botId) {
@@ -181,6 +183,7 @@ export class DirectChatManager {
       throw err;
     }
     this.store?.setDmProjectId?.(id, clean);
+    this._lastProjectSig.delete(id);
     const runner = this._runners.get(id);
     if (runner) {
       const proj = this.resolveProject(id);
@@ -227,6 +230,7 @@ export class DirectChatManager {
       }
       this._runners.delete(id);
     }
+    this._lastProjectSig.delete(id);
     this.store?.clearDmMessages?.(id);
     void this._emit(id, "cleared", { bot_id: id });
     return { ok: true, bot_id: id };
@@ -279,15 +283,26 @@ export class DirectChatManager {
 
   _buildPrompt(botId, userText, project) {
     const parts = [];
-    if (project?.root_path) {
-      const branch = detectGitBranch(project.root_path);
-      parts.push(
-        `=== 当前绑定的项目工作目录 ===\n名称：${project.name}\n路径：${project.root_path}${branch ? `\nGit 分支：${branch}` : ""}\n提示：所有文件读写与终端命令均默认在此项目目录内执行。`,
-      );
-    }
-    // Include short recent history when session is freshly created
     const runner = this._runners.get(botId);
-    if (!runner?.isReady && this.store?.listDmMessages) {
+    const sessionFresh = !runner?.isReady;
+
+    // `dsh` Assembly Line 3 — Delta Runtime Facts: only emit project/branch block
+    // on Turn 1 or when the bound project/branch actually changes, avoiding redundant turn bloat.
+    if (project?.root_path) {
+      const branch = detectGitBranch(project.root_path) || "";
+      const sig = `${project.id || ""}|${project.root_path}|${branch}`;
+      if (sessionFresh || this._lastProjectSig.get(botId) !== sig) {
+        this._lastProjectSig.set(botId, sig);
+        parts.push(
+          `=== 当前绑定的项目工作目录 ===\n名称：${project.name}\n路径：${project.root_path}${branch ? `\nGit 分支：${branch}` : ""}\n提示：所有文件读写与终端命令均默认在此项目目录内执行。`,
+        );
+      }
+    } else if (this._lastProjectSig.has(botId)) {
+      this._lastProjectSig.delete(botId);
+    }
+
+    // Include short recent history only when session is freshly created
+    if (sessionFresh && this.store?.listDmMessages) {
       const recent = this.store.listDmMessages(botId, 12);
       // Exclude the just-appended latest user message
       const prior = recent.length > 1 ? recent.slice(0, -1) : [];
@@ -383,6 +398,8 @@ export class DirectChatManager {
         ttft_ms: telemetry.ttft_ms,
         input_tokens: result?.usage?.input || 0,
         output_tokens: result?.usage?.output || 0,
+        cache_read_tokens: result?.usage?.cacheRead || telemetry.cache_read_tokens || 0,
+        cache_write_tokens: result?.usage?.cacheWrite || telemetry.cache_write_tokens || 0,
         bot_id: botId,
       });
     }

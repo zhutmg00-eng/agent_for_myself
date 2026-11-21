@@ -119,6 +119,9 @@ export function bootstrapEnv() {
   set("PI_OFFLINE", process.env.FUSION_PI_ONLINE === "1" ? undefined : "1");
   set("PI_SKIP_VERSION_CHECK", "1");
   set("PI_TELEMETRY", "0");
+  if (!process.env.PI_CACHE_RETENTION) {
+    set("PI_CACHE_RETENTION", process.env.FUSION_CACHE_RETENTION || "long");
+  }
   // Process temp / caches must not land on C:.
   set("TEMP", DIRS.temp);
   set("TMP", DIRS.temp);

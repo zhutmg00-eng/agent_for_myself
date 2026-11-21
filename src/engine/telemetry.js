@@ -40,6 +40,12 @@ export function computeTurnTelemetry({ startedAt, firstTokenAt, endedAt = Date.n
   const totalSec = totalMs / 1000;
   const e2eTps = totalSec > 0 && outputTokens > 0 ? Number((outputTokens / totalSec).toFixed(1)) : 0;
 
+  // Prompt Cache Hit Rate (%): cached prompt tokens / total prompt tokens
+  const totalPromptTokens = inputTokens + cacheRead + cacheWrite;
+  const cacheHitRate = totalPromptTokens > 0
+    ? Number(((cacheRead / totalPromptTokens) * 100).toFixed(1))
+    : 0;
+
   return {
     ttft_ms: ttftMs,
     gen_ms: genMs,
@@ -52,5 +58,6 @@ export function computeTurnTelemetry({ startedAt, firstTokenAt, endedAt = Date.n
     cache_read_tokens: cacheRead,
     cache_write: cacheWrite,
     cache_write_tokens: cacheWrite,
+    cache_hit_rate: cacheHitRate,
   };
 }

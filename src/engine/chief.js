@@ -18,6 +18,13 @@ import { DIRS, assertNotC, ensureDirs } from "../config.js";
 import { createLogger } from "../log.js";
 import { loadPi } from "./pi.js";
 import { createHooksExtension } from "../hooks.js";
+import { createCacheOptimizerExtension } from "./cache_optimizer.js";
+import {
+  FileReadTracker,
+  ToolLoopGuard,
+  createToolAccuracyExtension,
+  enhanceSessionToolAccuracy,
+} from "./tool_accuracy.js";
 
 const log = createLogger("engine.chief");
 
@@ -121,6 +128,14 @@ export class ChiefRunner {
     const model = this.engine?.defaultModel || this.engine?.getModel?.(null);
     if (!model) throw new Error("no model available for chief session");
     const settingsManager = pi.SettingsManager.create(cwd, this.agentDir);
+    const fileTracker = new FileReadTracker();
+    const loopGuard = new ToolLoopGuard();
+    const reportToolAccuracy = (metric) => {
+      void this._publish("worker.chief.tool_accuracy", { member: "chief", ...metric });
+    };
+    const reportCacheMetrics = (info) => {
+      void this._publish("worker.chief.cache_checked", { member: "chief", ...info });
+    };
     const loader = new pi.DefaultResourceLoader({
       cwd,
       agentDir: this.agentDir,
@@ -132,7 +147,22 @@ export class ChiefRunner {
       appendSystemPrompt: [
         "# 当前环境\n- 工作区：你的当前目录（cwd），可用 read/write/edit/bash/grep/find/ls 操作。\n- 群聊房间的工作区在 <DATA>/workspace/rooms/<room_id>/<bot_id>，可以读取但不要代替成员执行他们的任务。",
       ],
-      extensionFactories: [createHooksExtension(this.hooks)],
+      extensionFactories: [
+        createHooksExtension(this.hooks),
+        createCacheOptimizerExtension({
+          sessionKey: "chief",
+          modelId: model.id,
+          supportsLongTtl: Boolean(model.compat?.supportsLongCacheRetention),
+          onMetrics: reportCacheMetrics,
+        }),
+        createToolAccuracyExtension({
+          cwd,
+          fileTracker,
+          loopGuard,
+          getActiveTools: () => CHIEF_TOOLS,
+          onMetric: reportToolAccuracy,
+        }),
+      ],
     });
     await loader.reload();
     const sessionManager = pi.SessionManager.create(cwd, DIRS.sessions);
@@ -146,6 +176,11 @@ export class ChiefRunner {
       resourceLoader: loader,
       tools: CHIEF_TOOLS,
       thinkingLevel: "off",
+    });
+    enhanceSessionToolAccuracy(session, {
+      cwd,
+      fileTracker,
+      onMetric: reportToolAccuracy,
     });
     this.session = session;
     try {
@@ -359,7 +394,7 @@ export class ChiefRunner {
       }
     }
 
-    if (this.store?.addUsage && (usage.input || usage.output)) {
+    if (this.store?.addUsage && (usage.input || usage.output || usage.cacheRead)) {
       try {
         this.store.addUsage({
           bot_id: this.bot.id || "chief",
@@ -367,6 +402,8 @@ export class ChiefRunner {
           model: `${this.engine?.defaultModel?.provider || "magpie"}/${this.engine?.defaultModel?.id || ""}`,
           input_tokens: usage.input,
           output_tokens: usage.output,
+          cache_read_tokens: usage.cacheRead || 0,
+          cache_write_tokens: usage.cacheWrite || 0,
           ms,
         });
       } catch (err) {

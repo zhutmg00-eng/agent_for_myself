@@ -21,6 +21,13 @@ import { createHooksExtension } from "../hooks.js";
 import { CORE_TOOLS, toolsForRole, resolveToolsets } from "../toolsets.js";
 import { clampToolOutput } from "./clamp.js";
 import { computeTurnTelemetry } from "./telemetry.js";
+import { buildStableRoomAppendix, createCacheOptimizerExtension } from "./cache_optimizer.js";
+import {
+  FileReadTracker,
+  ToolLoopGuard,
+  createToolAccuracyExtension,
+  enhanceSessionToolAccuracy,
+} from "./tool_accuracy.js";
 
 
 const log = createLogger("engine.bot");
@@ -209,17 +216,17 @@ export class BotRunner {
     return persona;
   }
 
-  /** Append-only system prompt block with the current room facts. */
+  /**
+   * Append-only static system prompt block (`dsh` Assembly Line 1).
+   * Volatile facts (mutable topic, dynamic member list, room files) are delivered
+   * per turn in user messages so the system prompt KV prefix remains byte-stable.
+   */
   buildRoomBlock() {
-    const block = roomContextBlock({
+    return buildStableRoomAppendix({
       roomId: this.roomId,
       roomTitle: this.roomContext.roomTitle,
-      topic: this.roomContext.topic,
-      members: this.roomContext.members,
-      files: this.roomContext.files,
+      readOnly: this.readOnly,
     });
-    const allowed = this.readOnly ? "\n- 你是只读成员：不要尝试写文件或执行命令。" : "";
-    return `${block}${allowed}`;
   }
 
   /** Names of the tools this bot should have active. */
@@ -321,9 +328,40 @@ export class BotRunner {
         }
       },
     });
+    const fileTracker = new FileReadTracker();
+    const loopGuard = new ToolLoopGuard();
+    const sessionKey = this.roomId ? `room:${this.roomId}:${this.botId}` : `dm:${this.botId}`;
+    const reportToolAccuracy = (metric) => {
+      void this._publish("tool_accuracy", {
+        member: this.botId,
+        room_id: this.roomId,
+        ...metric,
+      });
+    };
+    const reportCacheMetrics = (info) => {
+      void this._publish("cache_checked", {
+        member: this.botId,
+        room_id: this.roomId,
+        ...info,
+      });
+    };
+
     const extensions = [
       hooksExtension,
       this._createGuardExtension(),
+      createCacheOptimizerExtension({
+        sessionKey,
+        modelId: model.id,
+        supportsLongTtl: Boolean(model.compat?.supportsLongCacheRetention),
+        onMetrics: reportCacheMetrics,
+      }),
+      createToolAccuracyExtension({
+        cwd,
+        fileTracker,
+        loopGuard,
+        getActiveTools: () => this.activeToolNames(),
+        onMetric: reportToolAccuracy,
+      }),
       this._createToolEventExtension(),
       this._createToolOutputClampExtension(),
     ];
@@ -356,9 +394,17 @@ export class BotRunner {
       thinkingLevel: this.bot.thinking_level || "off",
     });
 
+    enhanceSessionToolAccuracy(session, {
+      cwd,
+      fileTracker,
+      onMetric: reportToolAccuracy,
+    });
+
     this.session = session;
     this.loader = loader;
     this._extensions = extensions;
+    this._fileTracker = fileTracker;
+    this._loopGuard = loopGuard;
     try {
       this.sessionPath = sessionManager.getSessionFile?.() || null;
     } catch {

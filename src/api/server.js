@@ -657,25 +657,31 @@ export async function createApp(options = {}) {
   if (app.events?.subscribe) {
     app._unsubPerfEvents = app.events.subscribe((evt) => {
       const topic = String(evt?.topic || "");
-      const m = topic.match(/^worker\.([^.]+)\.(turn_started|turn_completed)$/);
+      const m = topic.match(/^worker\.([^.]+)\.(turn_started|turn_completed|cache_checked|tool_accuracy)$/);
       if (!m) return;
       const [, botId, kind] = m;
+      const p = evt.payload || {};
       if (kind === "turn_started") {
         app.perfMonitor?.beginTurn?.();
       } else if (kind === "turn_completed") {
         app.perfMonitor?.endTurn?.();
-        const p = evt.payload || {};
         const tel = p.telemetry || {};
         const usage = p.usage || {};
-        if (tel.tps || tel.ttft_ms || usage.input || usage.output) {
+        if (tel.tps || tel.ttft_ms || usage.input || usage.output || usage.cacheRead) {
           app.perfMonitor?.recordTurnTelemetry?.({
             tps: tel.tps || 0,
             ttft_ms: tel.ttft_ms || 0,
             input_tokens: usage.input || 0,
             output_tokens: usage.output || 0,
+            cache_read_tokens: usage.cacheRead || tel.cache_read_tokens || 0,
+            cache_write_tokens: usage.cacheWrite || tel.cache_write_tokens || 0,
             bot_id: botId,
           });
         }
+      } else if (kind === "cache_checked") {
+        app.perfMonitor?.recordCacheCheck?.(p);
+      } else if (kind === "tool_accuracy") {
+        app.perfMonitor?.recordToolMetric?.(p);
       }
     });
   }

@@ -501,6 +501,34 @@ function perfTab() {
       </div>
 
       <div class="settings-section">
+        <h3>缓存命中与工具准确率（dsh · OpenCode 优化引擎）</h3>
+        <div class="set-card">
+          <div class="engine-grid perf-sys-grid">
+            <div class="engine-kv">
+              <div class="k">Prompt 缓存命中率</div>
+              <div class="v" id="perf-opt-cache-rate">${d.optimization?.prompt_tokens ? `${Number(d.optimization.cache_hit_rate_pct || 0).toFixed(1)}%` : "--"}</div>
+              <div class="stat-sub" id="perf-opt-cache-sub">${d.optimization?.prompt_tokens ? `命中 ${formatTokens(d.optimization.cache_read_tokens || 0)} / ${formatTokens(d.optimization.prompt_tokens || 0)} tok` : "等待模型请求"}</div>
+            </div>
+            <div class="engine-kv">
+              <div class="k">KV 前缀稳定度</div>
+              <div class="v" id="perf-opt-prefix">${Number(d.optimization?.prefix_stability_pct ?? 100).toFixed(1)}%</div>
+              <div class="stat-sub" id="perf-opt-prefix-sub">${Number(d.optimization?.prefix_requests || 0)} 次校验 · ${Number(d.optimization?.prefix_busts || 0)} 次失效</div>
+            </div>
+            <div class="engine-kv">
+              <div class="k">工具调用准确率</div>
+              <div class="v" id="perf-opt-tool-acc">${d.optimization?.tool_calls_total ? `${Number(d.optimization.tool_accuracy_pct || 0).toFixed(1)}%` : "--"}</div>
+              <div class="stat-sub" id="perf-opt-tool-sub">${Number(d.optimization?.tool_calls_ok || 0)} / ${Number(d.optimization?.tool_calls_total || 0)} 成功</div>
+            </div>
+            <div class="engine-kv">
+              <div class="k">智能纠偏与保护</div>
+              <div class="v" id="perf-opt-repairs">${Number(d.optimization?.tool_calls_repaired || 0) + Number(d.optimization?.edit_fuzzy_hits || 0) + Number(d.optimization?.doom_loops_prevented || 0)} 次</div>
+              <div class="stat-sub" id="perf-opt-repairs-sub">修复 ${Number(d.optimization?.tool_calls_repaired || 0)} · 模糊 ${Number(d.optimization?.edit_fuzzy_hits || 0)} · 止环 ${Number(d.optimization?.doom_loops_prevented || 0)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h3>运行环境</h3>
         <div class="set-card">
           <div class="engine-grid perf-sys-grid">
@@ -970,6 +998,7 @@ function bindContent(root, ctx) {
       if (!data || !root.isConnected) return;
       const cur = data.current || {};
       const sum = data.summary || {};
+      const opt = data.optimization || {};
       const sys = data.system || {};
       const setTxt = (sel, val) => { const el = $(sel, root); if (el) el.textContent = String(val); };
       setTxt("#perf-kpi-mem", Number(cur.mem_pct || 0).toFixed(1));
@@ -980,6 +1009,15 @@ function bindContent(root, ctx) {
       setTxt("#perf-kpi-tps-sub", `均值 ${Number(sum.avg_tps || 0).toFixed(1)} · 峰值 ${Number(sum.peak_tps || 0).toFixed(1)} tok/s`);
       setTxt("#perf-kpi-ttft", Math.round(sum.avg_ttft_ms || cur.ttft_ms || 0));
       setTxt("#perf-kpi-turns-sub", `${Number(sum.active_turns || 0)} 路活跃 · 累计 ${formatTokens(sum.total_tokens || 0)} tok`);
+      setTxt("#perf-opt-cache-rate", opt.prompt_tokens ? `${Number(opt.cache_hit_rate_pct || 0).toFixed(1)}%` : "--");
+      setTxt("#perf-opt-cache-sub", opt.prompt_tokens ? `命中 ${formatTokens(opt.cache_read_tokens || 0)} / ${formatTokens(opt.prompt_tokens || 0)} tok` : "等待模型请求");
+      setTxt("#perf-opt-prefix", `${Number(opt.prefix_stability_pct ?? 100).toFixed(1)}%`);
+      setTxt("#perf-opt-prefix-sub", `${Number(opt.prefix_requests || 0)} 次校验 · ${Number(opt.prefix_busts || 0)} 次失效`);
+      setTxt("#perf-opt-tool-acc", opt.tool_calls_total ? `${Number(opt.tool_accuracy_pct || 0).toFixed(1)}%` : "--");
+      setTxt("#perf-opt-tool-sub", `${Number(opt.tool_calls_ok || 0)} / ${Number(opt.tool_calls_total || 0)} 成功`);
+      const totalSaves = Number(opt.tool_calls_repaired || 0) + Number(opt.edit_fuzzy_hits || 0) + Number(opt.doom_loops_prevented || 0);
+      setTxt("#perf-opt-repairs", `${totalSaves} 次`);
+      setTxt("#perf-opt-repairs-sub", `修复 ${Number(opt.tool_calls_repaired || 0)} · 模糊 ${Number(opt.edit_fuzzy_hits || 0)} · 止环 ${Number(opt.doom_loops_prevented || 0)}`);
       setTxt("#perf-sys-platform", `${sys.platform || ""} (${sys.arch || ""})`);
       setTxt("#perf-sys-node", sys.node_version || "-");
       setTxt("#perf-sys-cpu", `${sys.cpu_count || 1} 核 · ${Number(cur.cpu_load_1m || 0).toFixed(2)}`);

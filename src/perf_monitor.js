@@ -54,6 +54,22 @@ export class PerfMonitor {
     this.lastTurnAt = 0;
     this.lastTtftMs = 0;
 
+    // Prompt Cache & Tool Calling Accuracy telemetry (dsh + OpenCode optimization layer)
+    this.cacheReadTokens = 0;
+    this.cacheWriteTokens = 0;
+    this.promptInputTokens = 0;
+    this.prefixRequests = 0;
+    this.prefixStable = 0;
+    this.prefixBusts = 0;
+    this.lastBustReason = null;
+
+    this.toolCallsTotal = 0;
+    this.toolCallsOk = 0;
+    this.toolCallsFailed = 0;
+    this.toolCallsRepaired = 0;
+    this.editFuzzyHits = 0;
+    this.doomLoopsPrevented = 0;
+
     /** Recent completed turn telemetry samples (last 20 turns) */
     this._recentTurns = [];
     /** Streaming token buckets for live mid-turn TPS estimation: [{ ts, tokens }] */
@@ -115,9 +131,14 @@ export class PerfMonitor {
     const ttftMs = Number(info.ttft_ms || 0);
     const inputTokens = Math.max(0, Number(info.input_tokens || 0));
     const outputTokens = Math.max(0, Number(info.output_tokens || 0));
+    const cacheRead = Math.max(0, Number(info.cache_read_tokens ?? info.cache_read ?? 0));
+    const cacheWrite = Math.max(0, Number(info.cache_write_tokens ?? info.cache_write ?? 0));
 
     this.totalTurns += 1;
-    this.totalTokens += inputTokens + outputTokens;
+    this.totalTokens += inputTokens + outputTokens + cacheRead + cacheWrite;
+    this.promptInputTokens += inputTokens;
+    this.cacheReadTokens += cacheRead;
+    this.cacheWriteTokens += cacheWrite;
 
     if (tps > 0) {
       this.lastTurnTps = round1(tps);
@@ -128,16 +149,55 @@ export class PerfMonitor {
       this.lastTtftMs = Math.round(ttftMs);
     }
 
+    const turnPromptTotal = inputTokens + cacheRead + cacheWrite;
+    const cacheHitPct = turnPromptTotal > 0 ? round1((cacheRead / turnPromptTotal) * 100) : 0;
+
     this._recentTurns.push({
       ts,
       tps: round1(tps),
       ttft_ms: Math.round(ttftMs),
       input_tokens: inputTokens,
       output_tokens: outputTokens,
+      cache_read_tokens: cacheRead,
+      cache_write_tokens: cacheWrite,
+      cache_hit_pct: cacheHitPct,
       bot_id: info.bot_id ? String(info.bot_id) : null,
     });
     if (this._recentTurns.length > 20) {
       this._recentTurns.splice(0, this._recentTurns.length - 20);
+    }
+  }
+
+  /** Record one provider-request prefix stability check from CacheOptimizer. */
+  recordCacheCheck(info = {}) {
+    this.prefixRequests += 1;
+    if (info.prefixStable !== false) {
+      this.prefixStable += 1;
+    } else {
+      this.prefixBusts += 1;
+      this.lastBustReason = info.cacheBustReason ? String(info.cacheBustReason) : "prefix_changed";
+    }
+  }
+
+  /** Record one tool execution outcome or accuracy recovery event. */
+  recordToolMetric(info = {}) {
+    const type = String(info.type || "");
+    if (type === "arg_repaired" || type === "name_repaired" || info.repaired) {
+      this.toolCallsRepaired += 1;
+      return;
+    }
+    if (type === "fuzzy_edit" || info.fuzzyEdit) {
+      this.editFuzzyHits += Math.max(1, Number(info.fuzzyCount || 1));
+      return;
+    }
+    if (type === "loop_prevented" || info.loopPrevented) {
+      this.doomLoopsPrevented += 1;
+      return;
+    }
+    if (type === "tool_result" || typeof info.ok === "boolean") {
+      this.toolCallsTotal += 1;
+      if (info.ok) this.toolCallsOk += 1;
+      else this.toolCallsFailed += 1;
     }
   }
 
@@ -220,6 +280,19 @@ export class PerfMonitor {
       ? Math.round(ttftSamples.reduce((s, t) => s + t.ttft_ms, 0) / ttftSamples.length)
       : Math.round(storeUsage?.avg_ttft_ms || 0);
 
+    const totalCacheRead = Math.max(this.cacheReadTokens, Number(storeUsage?.cache_read || storeUsage?.cache_read_tokens || 0));
+    const totalCacheWrite = Math.max(this.cacheWriteTokens, Number(storeUsage?.cache_write || storeUsage?.cache_write_tokens || 0));
+    const totalPromptIn = Math.max(this.promptInputTokens, Number(storeUsage?.input_tokens || 0));
+    const totalPromptAll = totalPromptIn + totalCacheRead + totalCacheWrite;
+    const cacheHitRatePct = totalPromptAll > 0 ? round1((totalCacheRead / totalPromptAll) * 100) : 0;
+
+    const prefixStabilityPct = this.prefixRequests > 0
+      ? round1((this.prefixStable / this.prefixRequests) * 100)
+      : 100;
+    const toolAccuracyPct = this.toolCallsTotal > 0
+      ? round1((this.toolCallsOk / this.toolCallsTotal) * 100)
+      : 100;
+
     const sys = this._readSystem();
     return {
       current,
@@ -232,6 +305,24 @@ export class PerfMonitor {
         total_tokens: Math.max(this.totalTokens, Number(storeUsage?.total_tokens || 0)),
         total_turns: Math.max(this.totalTurns, Number(storeUsage?.calls || 0)),
         active_turns: this.activeTurns,
+      },
+      optimization: {
+        cache_hit_rate_pct: cacheHitRatePct,
+        cache_read_tokens: totalCacheRead,
+        cache_write_tokens: totalCacheWrite,
+        prompt_tokens: totalPromptAll,
+        prefix_stability_pct: prefixStabilityPct,
+        prefix_requests: this.prefixRequests,
+        prefix_stable: this.prefixStable,
+        prefix_busts: this.prefixBusts,
+        last_bust_reason: this.lastBustReason,
+        tool_accuracy_pct: toolAccuracyPct,
+        tool_calls_total: this.toolCallsTotal,
+        tool_calls_ok: this.toolCallsOk,
+        tool_calls_failed: this.toolCallsFailed,
+        tool_calls_repaired: this.toolCallsRepaired,
+        edit_fuzzy_hits: this.editFuzzyHits,
+        doom_loops_prevented: this.doomLoopsPrevented,
       },
       system: {
         platform: process.platform,

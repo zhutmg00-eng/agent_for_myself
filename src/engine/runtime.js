@@ -321,7 +321,11 @@ export function buildModelsJson(models, gatewayUrl = GATEWAY_URL) {
         baseUrl: base,
         api: "openai-completions",
         apiKey: "magpie-local",
-        compat: { sendSessionAffinityHeaders: true },
+        compat: {
+          sendSessionAffinityHeaders: true,
+          supportsCacheControlOnTools: true,
+          supportsLongCacheRetention: true,
+        },
         models: entries,
       },
     },
